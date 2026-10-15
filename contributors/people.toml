@@ -78,3 +78,7 @@ sync_github_name = true
 [people.moecr7]
 real_name = "Moein Saharkhiz"
 display_name = "onlymoein"
+
+[people.guillehr2]
+real_name = "Guillem Hermida"
+sync_github_name = true
