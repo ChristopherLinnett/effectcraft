@@ -433,8 +433,10 @@ fn copy_a_selected_property_pastes_onto_the_same_property() {
     s.execute("prop.toggleAnimation", json!({"layer": a, "path": "transform/opacity"})).unwrap();
     s.execute("time.set", json!({"time": 1.0})).unwrap();
     s.execute("prop.set", json!({"layer": a, "path": "transform/opacity", "value": 0})).unwrap();
+    s.execute("prop.select", json!({"layer": a, "path": "transform/opacity"})).unwrap();
+    assert_eq!(s.state.selected_keys.len(), 2);
     let transform = layer(&s, a).props.sub("transform").unwrap().uid;
-    s.execute("prop.select", json!({"layer": a, "prop": transform})).unwrap();
+    s.execute("prop.select", json!({"layer": a, "prop": transform, "selectKeys": false})).unwrap();
     s.execute("edit.copy", json!({})).unwrap();
     s.execute("layer.select", json!({"layers": [b]})).unwrap();
     s.execute("time.set", json!({"time": 2.0})).unwrap();

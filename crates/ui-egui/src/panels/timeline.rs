@@ -1901,6 +1901,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         if let Some(i) = rows.iter().position(|r| matches!(r.kind, RowKind::Layer) && Some(r.layer) == top) {
             app.ui.timeline.scroll_y = rows.iter().take(i).map(|r| row_height(r, rh)).sum();
         }
+    } else if let Some(crate::state::ScrollTo::Property(uid)) = scroll_to
+        && let Some(i) = rows.iter().position(|r| matches!(r.kind, RowKind::Prop { uid: p } if p == uid))
+    {
+        app.ui.timeline.scroll_y = rows.iter().take(i).map(|r| row_height(r, rh)).sum();
     }
     if ui.rect_contains_pointer(rows_rect) {
         let (dy, dx, zoom) = ui.input(|i| (i.smooth_scroll_delta.y, i.smooth_scroll_delta.x, i.modifiers.alt));
