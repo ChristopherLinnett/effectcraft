@@ -87,6 +87,20 @@ fn timeline_blank_menu_opens_solid_settings() {
     assert_eq!(h.state().dialog, Some(Dialog::SolidSettings));
 }
 
+/// Right-clicking the composition in the viewer offers Composition Settings…, which opens on the
+/// comp the viewer shows.
+#[test]
+fn viewer_menu_opens_composition_settings() {
+    let mut h = harness();
+    let comp = h.state().session.active_comp_id().unwrap();
+    let p = rect(&h, "viewer.comp").center();
+    right_click(&mut h, p);
+    h.get_by_label("Composition Settings…").click();
+    h.run_steps(3);
+    assert_eq!(h.state().dialog, Some(Dialog::CompSettings));
+    assert_eq!(h.state().session.active_comp_id(), Some(comp));
+}
+
 #[test]
 fn project_item_and_timeline_layer_keep_their_own_context_menus() {
     let mut h = harness();

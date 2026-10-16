@@ -25,12 +25,19 @@ fn ok_json(args: &[&str]) -> Value {
     v
 }
 
+/// `std::fs::canonicalize` without Windows' `\\?\` verbatim prefix, which a child's `current_dir()` never reports.
+fn canonical(path: &std::path::Path) -> std::io::Result<PathBuf> {
+    let path = std::fs::canonicalize(path)?;
+    let plain = path.to_str().and_then(|s| s.strip_prefix(r"\\?\")).filter(|s| s.as_bytes().get(1) == Some(&b':'));
+    Ok(plain.map(PathBuf::from).unwrap_or(path))
+}
+
 fn tmp(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("ec-cli-test-{}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
     // macOS's `/var` is a symlink to `/private/var`: a child process resolves its working
     // directory through `current_dir()`, which is canonical, so compare canonical paths.
-    std::fs::canonicalize(&d).unwrap_or(d).join(name)
+    canonical(&d).unwrap_or(d).join(name)
 }
 
 #[test]
@@ -160,6 +167,21 @@ fn unknown_options_are_usage_errors() {
     }
 }
 
+/// An argument that is not Unicode (a Latin-1 file name on Linux) is a usage error (exit 2)
+/// naming it, before anything runs: `std::env::args` panicked on one (exit 101).
+#[cfg(unix)]
+#[test]
+fn non_unicode_arguments_are_usage_errors() {
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::OsStr::from_bytes(b"caf\xe9.png");
+    let out = bin().args(["render-frame", "--out"]).arg(name).output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("argument `caf\u{fffd}.png` is not valid Unicode"), "{err}");
+    assert!(!err.contains("panicked"), "{err}");
+    assert!(out.stdout.is_empty(), "nothing ran");
+}
+
 /// A reader that closes stdout before the CLI writes (`| head`) is not a crash: the command
 /// still does its work and exits 0, without a panic (#167).
 #[test]
@@ -260,7 +282,7 @@ fn render_out_is_relative_to_the_working_directory() {
     std::fs::create_dir_all(&proj).unwrap();
     std::fs::create_dir_all(&elsewhere).unwrap();
     // current_dir resolves aliases such as macOS /var -> /private/var.
-    let root = root.canonicalize().unwrap();
+    let root = canonical(&root).unwrap();
     let (proj, elsewhere) = (root.join("proj"), root.join("elsewhere"));
     let project = proj.join("x.ecproj");
     let p = project.to_str().unwrap();

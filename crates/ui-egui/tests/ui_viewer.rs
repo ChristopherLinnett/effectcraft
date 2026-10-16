@@ -121,8 +121,10 @@ fn viewer_click_does_not_pick_through_hidden_or_locked_solo_layers() {
     }
 }
 
+/// Solo is not time-dependent (as in After Effects): outside the soloed layer's in-out range the
+/// viewer shows nothing, so neither the soloed layer nor the others can be picked.
 #[test]
-fn viewer_click_ignores_inactive_solo_layers() {
+fn viewer_click_picks_nothing_while_the_solo_layer_is_inactive() {
     let mut h = selection_harness();
     let comp = h.state().session.active_comp().unwrap();
     let (front, back) = (comp.layers[0].id, comp.layers[1].id);
@@ -133,7 +135,7 @@ fn viewer_click_ignores_inactive_solo_layers() {
     h.run_steps(3);
     let at = screen(&h, [320.0, 180.0]);
     click(&mut h, at);
-    assert_eq!(h.state().session.state.selected_layers, vec![back]);
+    assert!(h.state().session.state.selected_layers.is_empty(), "{back:?} stays excluded by solo");
 }
 
 /// A selected layer under the pointer takes the press before the layers in front of it, as in

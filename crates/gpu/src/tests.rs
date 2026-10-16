@@ -1044,3 +1044,19 @@ fn static_effect_layers_draw_from_the_cache() {
     assert!(frames[1] == frames[2]);
     check("static effect layer vs CPU", compare_at(&s, opts(), t(2)), 0.0);
 }
+
+/// The layer upload cache drops the textures of freed buffers when it inserts, not only once
+/// it is over budget (an animated layer makes a new buffer every frame).
+#[test]
+fn upload_cache_drops_textures_of_freed_buffers() {
+    let Some(g) = gpu() else { return };
+    let img = effectcraft_raster::Image::new(256, 256);
+    let before = g.ctx.upload_entries();
+    for _ in 0..6 {
+        let buf = std::sync::Arc::new(effectcraft_effects::Buf { img: img.clone(), offset: [0.0; 2], scale: 1.0 });
+        let up = g.ctx.upload_buf(&buf).expect("upload");
+        drop((up, buf));
+    }
+    let kept = g.ctx.upload_entries();
+    assert!(kept <= before + 1, "the upload cache kept {kept} textures of freed buffers (had {before})");
+}

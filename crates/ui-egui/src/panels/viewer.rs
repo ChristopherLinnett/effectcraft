@@ -1281,6 +1281,13 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             context_actions.push(("comp.copyFrame".to_owned(), serde_json::json!({"comp": cid.0})));
             ui.close();
         }
+        // The comp this viewer shows, which is not always the active one.
+        let settings = ui.button(crate::i18n::tr("Composition Settings…"));
+        app.auto.add("viewer.context.settings", settings.rect, "Composition Settings…");
+        if settings.clicked() {
+            context_actions.push(("comp.settings".to_owned(), serde_json::json!({"comp": cid.0})));
+            ui.close();
+        }
     });
     for (id, params) in context_actions {
         if let Err(e) = crate::menus::invoke(app, &ctx, &id, params) {
@@ -2283,9 +2290,10 @@ fn pen_press(
 }
 
 /// Visible, unlocked layers eligible for viewer hit tests, in front-to-back order.
-/// Solo scope matches the renderer: only active AV layers activate it, even when hidden or locked.
+/// Solo scope matches the renderer: any soloed AV layer activates it at every time (as in After
+/// Effects), even when hidden, locked or outside its in-out range.
 pub(crate) fn selectable_layers(comp: &Comp, time: Tick) -> impl Iterator<Item = &Layer> {
-    let any_solo = comp.layers.iter().any(|l| l.switches.solo && l.source.is_av() && l.is_active_at(time));
+    let any_solo = comp.layers.iter().any(|l| l.switches.solo && l.source.is_av());
     comp.layers
         .iter()
         .filter(move |l| l.is_active_at(time) && l.switches.video && !l.switches.locked && !l.is_camera() && !l.is_light() && (!any_solo || l.switches.solo))

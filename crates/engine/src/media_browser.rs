@@ -316,7 +316,9 @@ pub fn footage_metadata(f: &Footage) -> Value {
         "pixelAspect": f.pixel_aspect,
         "frameRate": f.frame_rate.as_f64(),
         "duration": f.duration.seconds(),
-        "frames": if f.has_video && f.kind != FootageKind::Still { Some(f.frame_rate.frame_at(f.duration)) } else { None },
+        // Rounded like the media pool's frame count: Matroska stores the duration in whole
+        // milliseconds, a hair short of the last frame at 30 fps (#1429).
+        "frames": if f.has_video && f.kind != FootageKind::Still { Some(f.frame_rate.frame_at(f.frame_rate.snap_nearest(f.duration))) } else { None },
         "hasVideo": f.has_video,
         "hasAudio": f.has_audio,
         "alpha": format!("{:?}", f.alpha),

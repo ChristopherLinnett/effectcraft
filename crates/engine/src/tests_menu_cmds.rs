@@ -708,6 +708,21 @@ fn sequence_layers() {
     assert_eq!(layer(&s, c).props.prop("transform/opacity").unwrap().keys.len(), 2);
 }
 
+/// File ▸ Dependencies ▸ Find Missing Fonts lists a text layer only when no face matches its
+/// font by family, PostScript or full name.
+#[test]
+fn fonts_named_by_their_postscript_or_full_name_are_not_missing() {
+    let mut s = comp();
+    // The first three name bundled faces by family, PostScript and full name; no face has the fourth.
+    let fonts = ["Noto Serif", "Inter-Bold", "Inter SemiBold", "No Such Font Family 123"];
+    let ids: Vec<u64> = fonts.iter().map(|f| s.execute("layer.newText", json!({"text": "Aa", "font": f})).unwrap()["layer"].as_u64().unwrap()).collect();
+    let r = s.execute("file.findMissing", json!({"what": "fonts"})).unwrap();
+    let listed: Vec<(u64, &str)> = r["fonts"].as_array().unwrap().iter().map(|f| (f["layer"].as_u64().unwrap(), f["font"].as_str().unwrap())).collect();
+    assert_eq!(listed, [(ids[3], fonts[3])], "{r}");
+    let f = s.execute("text.fontFeatures", json!({"layer": ids[1]})).unwrap();
+    assert_eq!((&f["family"], &f["style"], &f["missing"]), (&json!("Inter"), &json!("Bold"), &json!(false)), "{f}");
+}
+
 #[test]
 fn file_menu_project_ops() {
     let mut s = comp();
@@ -1556,6 +1571,31 @@ fn interpret_footage_loop_extends_video_layers() {
     assert_eq!(out(&s, after), 6.0, "a new layer plays every loop");
     assert_eq!(out(&s, before), 6.0, "a layer that ran to the clip's end still does");
     assert_eq!(s.project.item(effectcraft_project::ItemId(p)).unwrap().duration(), Some(Tick::from_seconds_f64(6.0)));
+}
+
+/// #1068: the same for an interpreted PNG sequence — the loop count survives interpretation and
+/// a freshly dragged layer plays every cycle.
+#[test]
+fn interpret_footage_loop_extends_sequence_layers() {
+    let mut s = comp();
+    let p = s.execute("file.importPlaceholder", json!({"name": "Seq", "width": 320, "height": 240, "duration": 0.4})).unwrap()["item"].as_u64().unwrap();
+    let id = effectcraft_project::ItemId(p);
+    // Make it a sequence like the importer's grouped PNGs.
+    s.edit("Seq", None, |proj, _| {
+        if let Some(ItemKind::Footage(f)) = proj.item_mut(id).map(|i| &mut i.kind) {
+            f.kind = effectcraft_project::FootageKind::Sequence;
+            f.sequence = (0..12).map(|n| format!("/tmp/seq_{n:04}.png")).collect();
+            f.sync_sequence_duration();
+        }
+        Ok(())
+    })
+    .unwrap();
+    s.state.project_selection = vec![id];
+    s.execute("file.interpretFootage", json!({"loop": 15.0})).unwrap();
+    let l = s.execute("layer.addItem", json!({"item": p})).unwrap()["layer"].as_u64().unwrap();
+    let layer = s.active_comp().unwrap().layer(effectcraft_project::LayerId(l)).unwrap();
+    let dur = (layer.out_point - layer.in_point).seconds();
+    assert!((dur - 6.0).abs() < 0.05, "15 loops of a 0.4 s sequence: {dur}");
 }
 
 #[test]

@@ -281,6 +281,28 @@ fn import_export_helpers() {
 }
 
 #[test]
+fn render_queue_resolves_a_bare_project_filename_against_the_working_directory() {
+    use effectcraft_project::render_queue::{OutputFormat, RenderQueueItem};
+    let mut s = session();
+    let cid = s.active_comp_id().unwrap();
+    let mut item = RenderQueueItem::new(1, cid);
+    item.output.output = "clip.mp4".into();
+    item.output.format = OutputFormat::H264;
+
+    // `--project ./proj.ecproj`: the parent is `.`, so the output goes beside the project.
+    s.path = Some("./proj.ecproj".into());
+    let dotted = s.resolve_output(&item).unwrap();
+
+    // `--project proj.ecproj`: the parent is the empty path, which must mean the same folder
+    // rather than the unsaved-project default (#1427).
+    s.path = Some("proj.ecproj".into());
+    let bare = s.resolve_output(&item).unwrap();
+
+    assert_eq!(PathBuf::from(&bare), PathBuf::from(&dotted), "a bare filename resolved to {bare} instead of {dotted}");
+    assert_eq!(PathBuf::from(&bare), PathBuf::from("./clip.mp4"));
+}
+
+#[test]
 fn render_queue_uses_default_folder_bit_depth_names_and_segments() {
     use effectcraft_project::render_queue::{OutputFormat, RenderQueueItem};
     let mut s = session();

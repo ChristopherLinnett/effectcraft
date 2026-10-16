@@ -563,27 +563,32 @@ fn position(msg: &str, file: &str, code: &str) -> (Option<u32>, Option<u32>) {
         let mut it = l[i..].split([':', ')']);
         Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
     };
+    // The innermost frame in the user's script, or the error's own position.
+    let frames: Vec<&str> = msg.lines().skip(1).collect();
+    let frame = frames.iter().find_map(|l| pick(l)).or_else(|| msg.lines().next().and_then(pick));
     // `ReferenceError: name is not defined`: boa places it at the start of the function that reads
-    // the name, so the first use of the name in the code is the better position (#1063).
+    // the name, so the name's first use from that frame's line on is the better position (#1063).
+    // With no frame to start from, the first use anywhere in the code is (#1161).
     let first = msg.lines().next().unwrap_or("");
     let undefined = first.split("ReferenceError: ").nth(1).and_then(|r| r.split(" is not defined").next());
-    if let Some(at) = undefined.and_then(|name| first_use(name, code)) {
+    let start_line = frame.map_or(1, |(line, _)| line);
+    if let Some(at) = undefined.and_then(|name| first_use(name, code, start_line)) {
         return (Some(at.0), Some(at.1));
     }
-    let frames: Vec<&str> = msg.lines().skip(1).collect();
-    if let Some((a, b)) = frames.iter().find_map(|l| pick(l)).or_else(|| msg.lines().next().and_then(pick)) {
+    if let Some((a, b)) = frame {
         return (Some(a), Some(b));
     }
     (None, None)
 }
 
-/// The first use of `name` as a whole identifier in `code`, as a 1-based line and column.
-fn first_use(name: &str, code: &str) -> Option<(u32, u32)> {
+/// The first use of `name` as a whole identifier in `code` on or after `start_line` (1-based), as a
+/// 1-based line and column.
+fn first_use(name: &str, code: &str, start_line: u32) -> Option<(u32, u32)> {
     if name.is_empty() {
         return None;
     }
     let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
-    for (n, line) in code.lines().enumerate() {
+    for (n, line) in code.lines().enumerate().skip(start_line.saturating_sub(1) as usize) {
         let b = line.as_bytes();
         let mut from = 0;
         while let Some(i) = line.get(from..).and_then(|rest| rest.find(name)).map(|i| i + from) {

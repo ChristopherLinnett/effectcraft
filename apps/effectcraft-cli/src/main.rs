@@ -263,8 +263,18 @@ fn value_arg(s: &str) -> Value {
     serde_json::from_str(s).unwrap_or_else(|_| json!(s))
 }
 
+/// The command line as text. `std::env::args` panics on an argument that is not Unicode (a
+/// Latin-1 file name on Linux). Every argument is used as a string, and a lossy copy would read or
+/// write another file than the one named, so such an argument is a usage error naming it.
+fn utf8_args(raw: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Vec<String>, String> {
+    raw.into_iter().map(|a| a.into_string().map_err(|a| format!("argument `{}` is not valid Unicode", a.to_string_lossy()))).collect()
+}
+
 fn main() {
-    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let raw = match utf8_args(std::env::args_os().skip(1)) {
+        Ok(raw) => raw,
+        Err(e) => fail_usage(&e),
+    };
     if matches!(raw.first().map(String::as_str), Some("--version" | "-V" | "version")) {
         say!("effectcraft-cli {}", env!("CARGO_PKG_VERSION"));
         return;
@@ -1268,6 +1278,18 @@ mod tests {
         let a = parse(&["render", "t.ecproj", "--comp=Main", "--work-area", "--out", "x.mp4", "--json"]).unwrap();
         assert_eq!((a.project.as_deref(), a.opt("--comp"), a.opt("--out")), (Some("t.ecproj"), Some("Main"), Some("x.mp4")));
         assert!(a.flag("--work-area") && a.flag("--json"));
+    }
+
+    /// `std::env::args` panicked on an argument that is not Unicode; it is a usage error naming
+    /// it, and Unicode arguments pass through unchanged.
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_arguments_are_refused() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let args = [OsString::from("render-frame"), OsString::from("--out"), OsString::from_vec(b"caf\xe9.png".to_vec())];
+        assert_eq!(utf8_args(args).unwrap_err(), "argument `caf\u{fffd}.png` is not valid Unicode");
+        assert_eq!(utf8_args([OsString::from("info"), OsString::from("caf\u{e9}.png")]).unwrap(), ["info", "caf\u{e9}.png"]);
     }
 
     /// Every `--option` the CLI reads is declared in VALUED or FLAGS, so none is refused.
