@@ -510,6 +510,12 @@ fn a_wrapped_long_line_leaves_the_sideways_wheel_to_the_timeline() {
     let start = h.state().ui.timeline.start;
     wheel_by(&mut h, field.center(), egui::vec2(-200.0, 0.0));
     assert!(h.state().ui.timeline.start > start, "a sideways turn over the field pans the Timeline's time");
+    let scroll_y = h.state().ui.timeline.scroll_y;
+    wheel(&mut h, field.center(), -100.0);
+    assert_eq!(h.state().ui.timeline.scroll_y, scroll_y, "the wheel over the field scrolls the wrapped lines, not the Timeline");
+    let (scrolled, shown) = text_drawn(&h, "Slider Control");
+    assert!(scrolled.min.y < laid_out.min.y - 10.0, "the wrapped lines scrolled up: {scrolled:?} from {laid_out:?}");
+    assert!(field.expand(1.0).contains_rect(shown), "and still show only in the field");
 }
 
 /// #1396: with a large editor font a field can hold fewer lines than it has rows. Two lines at
