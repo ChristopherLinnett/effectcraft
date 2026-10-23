@@ -12,6 +12,25 @@ fn near(a: [f32; 4], b: [f32; 4], tol: f32) -> bool {
 }
 
 #[test]
+fn gradient_stop_lookup_handles_duplicate_offsets() {
+    use crate::raster::eval_stops;
+    let stops = [(0.0, [0.0, 0.0, 0.0, 1.0]), (0.5, [1.0, 0.0, 0.0, 1.0]), (0.5, [0.0, 1.0, 0.0, 1.0]), (1.0, [0.0, 0.0, 1.0, 1.0])];
+    assert_eq!(eval_stops(&stops, 0.5), [1.0, 0.0, 0.0, 1.0]);
+    assert!(near(eval_stops(&stops, 0.5001), [0.0, 1.0, 0.0, 1.0], 3e-4));
+    assert_eq!(eval_stops(&stops, 0.75), [0.0, 0.5, 0.5, 1.0]);
+}
+
+#[test]
+fn raster_surface_budget_rejects_oversized_destination_before_allocation() {
+    let doc = parse(br#"<svg xmlns="http://www.w3.org/2000/svg"/>"#).unwrap();
+    // 16,384² RGBA-f32 pixels exceed the bounded destination-surface budget; no giant
+    // allocation should be attempted and the caller receives an empty image.
+    let img = rasterize(&doc, 16_384, 16_384, 1.0);
+    assert!(img.data.is_empty());
+    assert_eq!((img.width, img.height), (0, 0));
+}
+
+#[test]
 fn basic_shapes_structure() {
     let d = parse(BASIC).unwrap();
     assert_eq!((d.width, d.height), (200.0, 100.0));
@@ -216,4 +235,64 @@ fn deep_nesting_errors_instead_of_overflowing_the_stack() {
     );
     assert_eq!(crate::xml_depth(&s), 2);
     assert!(crate::parse(s.as_bytes()).is_ok());
+}
+
+/// How deep `g`'s groups nest, and how many shapes it holds.
+fn depth_and_shapes(g: &Group) -> (usize, usize) {
+    let mut depth = 0;
+    let mut shapes = 0;
+    for c in &g.children {
+        match c {
+            Node::Group(sub) => {
+                let (d, s) = depth_and_shapes(sub);
+                depth = depth.max(d + 1);
+                shapes += s;
+            }
+            Node::Shape(_) => shapes += 1,
+            Node::Image(_) => {}
+        }
+    }
+    (depth, shapes)
+}
+
+#[test]
+fn branching_use_references_stop_at_the_expansion_budget() {
+    // Each group uses the one before twice: 30 levels are 2^30 copies of one rectangle, from a
+    // file of a few kilobytes (#1236).
+    let mut defs = String::from(r#"<g id="g0"><rect width="1" height="1"/></g>"#);
+    for i in 1..=30 {
+        defs += &format!(r##"<g id="g{i}"><use href="#g{p}"/><use href="#g{p}" x="1"/></g>"##, p = i - 1);
+    }
+    let svg = format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><defs>{defs}</defs><use href="#g30"/></svg>"##);
+    let t0 = std::time::Instant::now();
+    let e = parse(svg.as_bytes()).unwrap_err();
+    assert!(e.to_string().contains("expand to more than"), "{e}");
+    assert!(t0.elapsed() < std::time::Duration::from_secs(10), "{:?}", t0.elapsed());
+    // Below the budget the same pattern imports whole: 2^10 rectangles.
+    let small = svg.replace(r##"<use href="#g30"/></svg>"##, r##"<use href="#g10"/></svg>"##);
+    let doc = parse(small.as_bytes()).unwrap();
+    assert_eq!(depth_and_shapes(&doc.root).1, 1024);
+}
+
+#[test]
+fn mutually_referencing_uses_are_cut_at_the_first_repeat() {
+    // A uses B and B uses A, neither inside the other: once each, not down to the depth limit.
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><defs>
+        <g id="a"><rect width="1" height="1"/><use href="#b"/></g>
+        <g id="b"><rect width="2" height="2"/><use href="#a"/></g>
+    </defs><use href="#a"/></svg>"##;
+    let doc = parse(svg.as_bytes()).unwrap();
+    let (depth, shapes) = depth_and_shapes(&doc.root);
+    assert_eq!(shapes, 2, "a's and b's rectangle, once each");
+    assert!(depth <= 6, "{depth}");
+}
+
+#[test]
+fn a_symbol_used_a_thousand_times_still_imports() {
+    let uses: String = (0..1000).map(|i| format!(r##"<use href="#icon" x="{i}"/>"##)).collect();
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><defs><symbol id="icon"><rect width="1" height="1"/><circle r="1"/><ellipse rx="1" ry="2"/></symbol></defs>{uses}</svg>"##
+    );
+    let doc = parse(svg.as_bytes()).unwrap();
+    assert_eq!(depth_and_shapes(&doc.root).1, 3000);
 }
