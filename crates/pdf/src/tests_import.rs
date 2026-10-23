@@ -344,6 +344,36 @@ fn eps_soon(body: &str) -> Doc {
 }
 
 #[test]
+fn eps_copy_stops_before_overflowing_the_operand_stack() {
+    // Eighteen rounds are deliberately bounded: enough to breach the cap on the unguarded
+    // interpreter, without attempting the audit report's out-of-memory input.
+    let doc = eps_soon("0 0 10 10 rectfill 1 18 { count copy } repeat clear 20 20 10 10 rectfill");
+    assert_eq!(doc.skipped, ["PostScript (operand stack limit)"]);
+    assert_eq!(doc.flatten().len(), 1, "artwork before the limit survives; execution stops");
+}
+
+#[test]
+fn eps_aload_stops_before_partially_filling_the_operand_stack() {
+    let doc = eps_soon("0 0 10 10 rectfill { 100000 array aload } stopped clear 20 20 10 10 rectfill");
+    assert_eq!(doc.skipped, ["PostScript (operand stack limit)"]);
+    assert_eq!(doc.flatten().len(), 1, "stopped must not swallow a resource-limit quit");
+}
+
+#[test]
+fn eps_copy_and_compound_values_still_draw_in_order() {
+    let doc = eps(b"0 0 10 10 4 copy rectfill 20 0 translate rectfill \
+        [ 0 0 10 10 ] 4 array copy aload pop 40 0 translate rectfill \
+        0 0 10 10 4 array astore aload pop 20 0 translate rectfill \
+        (ab) 0 2 getinterval length 2 eq { 0 20 10 10 rectfill } if\n");
+    assert_eq!(doc.flatten().len(), 5);
+    let img = render(&doc);
+    for x in [5, 25, 65, 85] {
+        assert!(img.get(x, 95)[3] > 0.99, "square at x={x}");
+    }
+    assert!(img.get(85, 75)[3] > 0.99);
+}
+
+#[test]
 fn arcs_with_huge_angles_end_at_their_second_angle() {
     use kurbo::{Point, Rect, Shape as _};
     // `arc` raises its second angle by multiples of 360 until it is at least the first, and
