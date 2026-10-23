@@ -492,6 +492,26 @@ fn a_long_line_stays_inside_its_field() {
     assert!(h.state().ui.timeline.start > start, "below the field the Timeline's time pans");
 }
 
+/// #1396: with Word Wrap a long line wraps instead of scrolling sideways, so a sideways wheel
+/// turn over its field still pans the Timeline's time; the wrapped lines, taller than the
+/// field's row, scroll up and down inside it.
+#[test]
+fn a_wrapped_long_line_leaves_the_sideways_wheel_to_the_timeline() {
+    let (mut h, _) = harness();
+    h.state_mut().session.prefs.scripting.word_wrap = true;
+    let long = format!("50{}", " + thisComp.layer(\"Controls\").effect(\"Slider Control\")(\"Slider\") * 0".repeat(4));
+    let (_, opacity) = with_expression(&mut h, "opacity", &long);
+    h.state_mut().ui.timeline.pps = Some(300.0);
+    h.run_steps(3);
+    let field = rect_of(&h, &format!("timeline.prop.{opacity}.expression"));
+    let (laid_out, shown) = text_drawn(&h, "Slider Control");
+    assert!(laid_out.width() <= field.width() + 1.0 && laid_out.height() > field.height() + 19.0, "the line wraps: {laid_out:?} in {field:?}");
+    assert!(field.expand(1.0).contains_rect(shown), "the wrapped lines show only in the field {field:?}: {shown:?}");
+    let start = h.state().ui.timeline.start;
+    wheel_by(&mut h, field.center(), egui::vec2(-200.0, 0.0));
+    assert!(h.state().ui.timeline.start > start, "a sideways turn over the field pans the Timeline's time");
+}
+
 /// #1396: with a large editor font a field can hold fewer lines than it has rows. Two lines at
 /// 32 pt are taller than a two-row field: they scroll inside it too, rather than running under
 /// the rows below.
