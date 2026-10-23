@@ -399,7 +399,8 @@ pub fn editor(
                 .layouter(&mut layouter)
                 .show(ui)
         });
-    let overflows = [scroll.content_size.x > scroll.inner_rect.width() + 0.5, tall];
+    // Sideways only without Word Wrap: with it the field doesn't scroll that way.
+    let overflows = [!p.word_wrap && scroll.content_size.x > scroll.inner_rect.width() + 0.5, tall];
     let out = scroll.inner;
     if let Some(c) = accepted {
         let mut st = out.state.clone();

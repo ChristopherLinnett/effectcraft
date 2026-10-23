@@ -411,13 +411,13 @@ fn line_numbers_shown(h: &Harness<'_, EffectcraftApp>, field: egui::Rect) -> Vec
 
 /// A wheel turn of `dy` points over `at`.
 fn wheel(h: &mut Harness<'_, EffectcraftApp>, at: Pos2, dy: f32) {
+    wheel_by(h, at, egui::vec2(0.0, dy));
+}
+
+/// A wheel turn of `delta` points (sideways too) over `at`.
+fn wheel_by(h: &mut Harness<'_, EffectcraftApp>, at: Pos2, delta: egui::Vec2) {
     h.input_mut().events.push(Event::PointerMoved(at));
-    h.input_mut().events.push(Event::MouseWheel {
-        unit: egui::MouseWheelUnit::Point,
-        delta: egui::vec2(0.0, dy),
-        modifiers: Modifiers::NONE,
-        phase: egui::TouchPhase::Move,
-    });
+    h.input_mut().events.push(Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta, modifiers: Modifiers::NONE, phase: egui::TouchPhase::Move });
     h.run_steps(20);
 }
 
@@ -478,6 +478,18 @@ fn a_long_line_stays_inside_its_field() {
     let moved = rect_of(&h, &format!("timeline.prop.{opacity}.expression"));
     let offset = text_drawn(&h, "Slider Control").0.min.y - moved.min.y;
     assert!((offset - (laid_out.min.y - field.min.y)).abs() < 1.0, "the line stays put in its field: {offset}");
+    // Zoomed in, a sideways turn pans the Timeline's time, but over the field it scrolls the line.
+    h.state_mut().ui.timeline.pps = Some(300.0);
+    h.run_steps(3);
+    let start = h.state().ui.timeline.start;
+    let (before, _) = text_drawn(&h, "Slider Control");
+    wheel_by(&mut h, moved.center(), egui::vec2(-200.0, 0.0));
+    assert_eq!(h.state().ui.timeline.start, start, "the Timeline's time stays");
+    let (after, shown) = text_drawn(&h, "Slider Control");
+    assert!(after.min.x < before.min.x - 50.0, "the line scrolled sideways: {after:?} from {before:?}");
+    assert!(shown.max.x <= moved.max.x + 1.0, "and still shows only across its field");
+    wheel_by(&mut h, pos2(moved.center().x, moved.max.y + 40.0), egui::vec2(-200.0, 0.0));
+    assert!(h.state().ui.timeline.start > start, "below the field the Timeline's time pans");
 }
 
 /// #1396: with a large editor font a field can hold fewer lines than it has rows. Two lines at
