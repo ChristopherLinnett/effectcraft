@@ -480,6 +480,29 @@ fn a_long_line_stays_inside_its_field() {
     assert!((offset - (laid_out.min.y - field.min.y)).abs() < 1.0, "the line stays put in its field: {offset}");
 }
 
+/// #1396: with a large editor font a field can hold fewer lines than it has rows. Two lines at
+/// 32 pt are taller than a two-row field: they scroll inside it too, rather than running under
+/// the rows below.
+#[test]
+fn a_large_font_scrolls_inside_its_field() {
+    let (mut h, _) = harness();
+    h.state_mut().session.prefs.scripting.editor_font_size = 32;
+    let (_, opacity) = with_expression(
+        &mut h,
+        "opacity",
+        "value
+  * 0.5 // Slider Control",
+    );
+    let field = rect_of(&h, &format!("timeline.prop.{opacity}.expression"));
+    let (laid_out, shown) = text_drawn(&h, "Slider Control");
+    assert!(laid_out.height() > field.height() + 19.0, "two lines at 32 pt are taller than two rows: {laid_out:?} in {field:?}");
+    assert!(field.expand(1.0).contains_rect(shown), "the text shows only in its field {field:?}: {shown:?}");
+    let scroll_y = h.state().ui.timeline.scroll_y;
+    wheel(&mut h, field.center(), -100.0);
+    assert_eq!(h.state().ui.timeline.scroll_y, scroll_y, "the wheel scrolls the text, not the Timeline");
+    assert!(text_drawn(&h, "Slider Control").0.min.y < laid_out.min.y - 10.0, "the text scrolled up");
+}
+
 fn key_with(h: &mut Harness<'_, EffectcraftApp>, key: Key, modifiers: Modifiers) {
     h.input_mut().events.push(Event::ModifiersChanged(modifiers));
     h.input_mut().events.push(Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers });

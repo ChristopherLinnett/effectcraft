@@ -331,8 +331,9 @@ fn layout(text: &str, font: FontId, base: Color32, sx: &Syntax, p: &Scripting, b
     job
 }
 
-/// The editor, `rows` Timeline rows tall: returns the response, and whether its text is wider and
-/// taller than `rect` (it then scrolls that way inside it); `buf` is edited in place.
+/// The editor in `rect`, centred in Timeline rows `room` tall (the field's background fills
+/// them): returns the response, and whether its text is wider and taller than it can show (it
+/// then scrolls that way inside `rect`); `buf` is edited in place.
 pub fn editor(
     ui: &mut egui::Ui,
     id: egui::Id,
@@ -340,7 +341,7 @@ pub fn editor(
     rect: Rect,
     p: &Scripting,
     color: Color32,
-    rows: usize,
+    room: f32,
     t: &Tokens,
 ) -> (egui::Response, [bool; 2]) {
     let size = (p.editor_font_size.clamp(8, 40) as f32) * 0.9;
@@ -367,26 +368,37 @@ pub fn editor(
     {
         accepted = accept_completion(buf, c);
     }
-    // Text with more lines than the field has rows (a line is shorter than a row, so that many
-    // show whole), or wider than the field without Word Wrap, scrolls inside it instead of
-    // spilling over the rows below (#1396). The scroll bars float over the text, so a one-line
-    // field keeps its line, and show a thin handle while there is more to see. The editor fills
-    // the field, so a click anywhere in it edits.
-    let wrap = if p.word_wrap { er.width() - 8.0 } else { f32::INFINITY };
-    let tall = layouter(&child, &*buf, wrap).rows.len() > rows;
+    // Text taller than the field's rows, or wider than the field without Word Wrap, scrolls
+    // inside it instead of spilling over the rows below (#1396); nothing draws outside those
+    // rows. A line of the default font with its margins fills one row exactly, a little more
+    // than a one-row field, so such a field doesn't scroll by a few pixels and keeps the wheel
+    // for the Timeline. The scroll bars float over the text, so a one-line field keeps its
+    // line, and show a thin handle while there is more to see. The editor fills the field, so a
+    // click anywhere in it edits.
+    let margin = egui::Margin::symmetric(4, 2);
+    let wrap = if p.word_wrap { er.width() - margin.sum().x } else { f32::INFINITY };
+    let tall = layouter(&child, &*buf, wrap).rect.height() + margin.sum().y > room + 0.5;
+    let rows = Rect::from_center_size(rect.center(), vec2(rect.width(), room));
+    child.set_clip_rect(child.clip_rect().intersect(rows));
     child.spacing_mut().scroll = egui::style::ScrollStyle { dormant_handle_opacity: 0.6, ..egui::style::ScrollStyle::floating() };
-    let scroll = egui::ScrollArea::new([!p.word_wrap, tall]).id_salt(id.with("scroll")).auto_shrink([false, false]).show(&mut child, |ui| {
-        egui::TextEdit::multiline(buf)
-            .id(id)
-            .font(Tokens::mono(size))
-            .desired_width(ui.available_width())
-            .desired_rows(1)
-            .min_size(vec2(0.0, er.height()))
-            .frame(egui::Frame::NONE)
-            .lock_focus(true)
-            .layouter(&mut layouter)
-            .show(ui)
-    });
+    let scroll = egui::ScrollArea::new([!p.word_wrap, tall])
+        .id_salt(id.with("scroll"))
+        .auto_shrink([false, false])
+        .min_scrolled_width(0.0)
+        .min_scrolled_height(0.0)
+        .show(&mut child, |ui| {
+            egui::TextEdit::multiline(buf)
+                .id(id)
+                .font(Tokens::mono(size))
+                .desired_width(ui.available_width())
+                .desired_rows(1)
+                .min_size(vec2(0.0, er.height()))
+                .margin(margin)
+                .frame(egui::Frame::NONE)
+                .lock_focus(true)
+                .layouter(&mut layouter)
+                .show(ui)
+        });
     let overflows = [scroll.content_size.x > scroll.inner_rect.width() + 0.5, tall];
     let out = scroll.inner;
     if let Some(c) = accepted {
