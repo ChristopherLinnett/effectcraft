@@ -1145,13 +1145,18 @@ fn fit_to_comp_fills_the_comp_with_shape_and_text_bounds() {
     let seen = seen_bounds(&s, t);
     assert!(close(seen[0], 0.0) && close(seen[1], 0.0) && close(seen[2], 640.0) && close(seen[3], 360.0), "the text's painted bounds fill the comp: {seen:?}");
 
-    // fitWidth spans the comp's width and centres vertically.
+    // fitWidth spans the comp's width and centres vertically. Fit already did both, so what shows
+    // fitWidth ran is the uniform scale it sets, which keeps the painted aspect ratio.
     for lid in [a, t] {
         s.execute("layer.transform", json!({"layers": [lid], "op": "fitWidth"})).unwrap();
         let seen = seen_bounds(&s, lid);
         assert!(close(seen[0], 0.0) && close(seen[2], 640.0), "fitWidth spans the comp width: {seen:?}");
         assert!(close((seen[1] + seen[3]) / 2.0, 180.0), "fitWidth centres vertically: {seen:?}");
+        let scale = layer(&s, lid).transform().unwrap().get("scale").unwrap().value.as_vec3();
+        assert!(close(scale[0], scale[1]), "fitWidth scales both axes alike: {scale:?}");
     }
+    let seen = seen_bounds(&s, a);
+    assert!(close(seen[3] - seen[1], 640.0 * 80.0 / 180.0), "the 180×80 rect keeps its aspect ratio: {seen:?}");
 }
 
 #[test]
