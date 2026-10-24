@@ -343,6 +343,7 @@ fn eps_soon(body: &str) -> Doc {
     rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap_or_else(|_| panic!("parsing {body} did not finish")).unwrap()
 }
 
+/// Public EPS parsing must stop exponential stack copying and retain artwork drawn before refusal.
 #[test]
 fn eps_copy_stops_before_overflowing_the_operand_stack() {
     // Eighteen rounds are deliberately bounded: enough to breach the cap on the unguarded
@@ -352,6 +353,7 @@ fn eps_copy_stops_before_overflowing_the_operand_stack() {
     assert_eq!(doc.flatten().len(), 1, "artwork before the limit survives; execution stops");
 }
 
+/// A stack-limit quit from `aload` must escape `stopped` without discarding prior artwork.
 #[test]
 fn eps_aload_stops_before_partially_filling_the_operand_stack() {
     let doc = eps_soon("0 0 10 10 rectfill { 100000 array aload } stopped clear 20 20 10 10 rectfill");
@@ -359,6 +361,7 @@ fn eps_aload_stops_before_partially_filling_the_operand_stack() {
     assert_eq!(doc.flatten().len(), 1, "stopped must not swallow a resource-limit quit");
 }
 
+/// Ordinary copies, compound stack transfers and string intervals must preserve rendered placement.
 #[test]
 fn eps_copy_and_compound_values_still_draw_in_order() {
     let doc = eps(b"0 0 10 10 4 copy rectfill 20 0 translate rectfill \

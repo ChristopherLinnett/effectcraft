@@ -54,6 +54,7 @@ impl V {
             _ => String::new(),
         }
     }
+    /// Return the array/procedure length without cloning its payload; other values have no items.
     fn item_count(&self) -> usize {
         match self {
             V::Array(a) => a.borrow().len(),
@@ -344,6 +345,7 @@ fn array(v: Vec<V>) -> V {
     V::Array(Rc::new(RefCell::new(v)))
 }
 
+/// Borrow an array/procedure and read exactly six numeric entries, ignoring nonnumeric entries.
 fn matrix_of(v: &V) -> Option<Affine> {
     let read = |items: &[V]| {
         let mut nums = items.iter().filter_map(V::num);
@@ -383,6 +385,7 @@ const MAX_STACK: usize = 100_000;
 const MAX_ALLOCATION: usize = 256 * 1024 * 1024;
 
 impl Interp {
+    /// Create an interpreter with independent operation and cumulative runtime-payload budgets.
     pub fn new(page: [f64; 4]) -> Interp {
         Interp {
             b: Builder::new(),
@@ -430,12 +433,14 @@ impl Interp {
     fn popn(&mut self) -> f64 {
         self.pop().num().unwrap_or(0.0)
     }
+    /// Retain one operand if it fits; bulk callers must preflight their complete result.
     fn push(&mut self, v: V) {
         if self.st.len() < MAX_STACK {
             self.st.push(v);
         }
     }
 
+    /// Refuse a bulk result before any operands are copied when `n` more slots would exceed the cap.
     fn stack_room(&mut self, n: usize) -> Result<(), Flow> {
         if self.st.len().saturating_add(n) <= MAX_STACK {
             return Ok(());
@@ -458,15 +463,18 @@ impl Interp {
         }
     }
 
+    /// Charge runtime value slots by their in-memory size, saturating oversized byte counts.
     fn allocate_items(&mut self, n: usize) -> Result<(), Flow> {
         self.allocate(n.saturating_mul(std::mem::size_of::<V>()))
     }
 
+    /// Charge then snapshot array/procedure slots shallowly, returning no items for other values.
     fn items(&mut self, v: &V) -> Result<Vec<V>, Flow> {
         self.allocate_items(v.item_count())?;
         Ok(v.items().unwrap_or_default())
     }
 
+    /// Precharge a string's worst-case lossy UTF-8 copy before producing the existing equality key.
     fn comparison_key(&mut self, v: &V) -> Result<String, Flow> {
         if let V::Str(s) = v {
             // Lossy UTF-8 replaces each invalid byte with at most three output bytes.
@@ -475,12 +483,14 @@ impl Interp {
         Ok(v.key())
     }
 
+    /// Charge the six matrix slots before constructing and pushing their array.
     fn push_matrix(&mut self, m: Affine) -> Result<(), Flow> {
         self.allocate_items(6)?;
         self.push(matrix_val(m));
         Ok(())
     }
 
+    /// Charge all 256 encoding slots before constructing and pushing their glyph-name array.
     fn push_encoding(&mut self, name: &str) -> Result<(), Flow> {
         self.allocate_items(256)?;
         self.push(encoding_array(name));
@@ -697,6 +707,7 @@ impl Interp {
         self.b.fill_stroke(path, Affine::IDENTITY, fill.map(|r| (Paint::Color(self.gs.color), 1.0, r)), st);
     }
 
+    /// Read scalar or array rectangle operands, charging array snapshots and generated path work.
     fn rect_path(&mut self) -> Result<Vec<BezPath>, Flow> {
         // x y w h, or an array / string of numbers.
         let top = self.pop();
@@ -741,6 +752,7 @@ impl Interp {
         }
     }
 
+    /// Dispatch a built-in operator, propagating resource-limit quits to stop the program.
     fn builtin(&mut self, n: &str, src: &mut Src) -> Result<(), Flow> {
         match n {
             // Stack.
@@ -1194,10 +1206,15 @@ impl Interp {
                         self.push(V::Str(Rc::new(RefCell::new(part))));
                     }
                     a => {
-                        let items = self.items(&a)?;
-                        let part = items.get(i.min(items.len())..i.saturating_add(c).min(items.len())).unwrap_or(&[]);
-                        self.allocate_items(part.len())?;
-                        let part = part.to_vec();
+                        let len = a.item_count();
+                        let start = i.min(len);
+                        let end = i.saturating_add(c).min(len);
+                        self.allocate_items(end.saturating_sub(start))?;
+                        let part = match a {
+                            V::Array(a) => a.borrow().get(start..end).unwrap_or(&[]).to_vec(),
+                            V::Proc(p) => p.get(start..end).unwrap_or(&[]).to_vec(),
+                            _ => vec![],
+                        };
                         self.push(array(part));
                     }
                 }
@@ -1821,6 +1838,7 @@ impl Interp {
         self.b.fill_stroke_named(&name, path, Affine::IDENTITY, Some((Paint::Color(self.gs.color), 1.0, FillRule::NonZero)), None);
     }
 
+    /// Pop and precharge a string-byte snapshot for text operators; nonstrings produce no bytes.
     fn pop_string(&mut self) -> Result<Vec<u8>, Flow> {
         Ok(match self.pop() {
             V::Str(s) => {
@@ -2037,6 +2055,124 @@ impl Interp {
 mod allocation_tests {
     use super::*;
 
+    /// Repeated short array/procedure slices spend only their returned slots, not source snapshots.
+    #[test]
+    fn eps_getinterval_short_slices_charge_only_returned_slots() {
+        let mut failures = vec![];
+        for setup in ["/a 4096 array def", "/a 4096 array cvx def"] {
+            let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+            it.run(setup.as_bytes());
+            assert_eq!(it.lookup("a").unwrap().item_count(), 4096);
+            it.allocation_budget = 3 * std::mem::size_of::<V>();
+            it.run(b"3 { /a load 17 1 getinterval pop } repeat 0 0 10 10 rectfill");
+            let left = it.allocation_budget;
+            let (nodes, _, skipped) = it.b.finish();
+            if left != 0 || nodes.len() != 1 || !skipped.is_empty() {
+                failures.push((setup, left, nodes.len(), skipped));
+            }
+        }
+        assert!(failures.is_empty(), "short intervals must fit their exact cumulative budget: {failures:?}");
+    }
+
+    /// A one-byte-short interval budget quits through `stopped` without losing earlier slices or art.
+    #[test]
+    fn eps_getinterval_refuses_only_the_slice_that_exceeds_the_budget() {
+        for setup in ["/a 4096 array def", "/a 4096 array cvx def"] {
+            let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+            it.run(setup.as_bytes());
+            it.run(b"0 0 10 10 rectfill");
+            it.allocation_budget = 3 * std::mem::size_of::<V>() - 1;
+            it.run(b"{ 3 { /a load 17 1 getinterval } repeat } stopped 20 20 10 10 rectfill");
+            assert_eq!(it.st.len(), 2, "{setup}: only two complete slices fit");
+            assert!(it.st.iter().all(|v| matches!(v, V::Array(_)) && v.item_count() == 1));
+            assert_eq!(it.allocation_budget, std::mem::size_of::<V>() - 1);
+            let (nodes, _, skipped) = it.b.finish();
+            assert_eq!(nodes.len(), 1, "{setup}: the resource quit must escape stopped and retain prior artwork");
+            assert_eq!(skipped, ["PostScript (allocation limit)"]);
+        }
+    }
+
+    /// Array/procedure intervals clamp empty, oversized and saturating ranges before charging.
+    #[test]
+    fn eps_getinterval_clamps_compound_bounds_before_charging() {
+        for setup in ["/a [ 11 22 33 ] def", "/a { 11 22 33 } def"] {
+            for (range, expected) in [
+                ("1 0", &[][..]),
+                ("3 1", &[][..]),
+                ("99 99", &[][..]),
+                ("9999999999999999999999999999999999999999 9999999999999999999999999999999999999999", &[][..]),
+                ("2 9", &[33.0][..]),
+                ("1 9999999999999999999999999999999999999999", &[22.0, 33.0][..]),
+                ("0 3", &[11.0, 22.0, 33.0][..]),
+            ] {
+                let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+                it.run(setup.as_bytes());
+                it.allocation_budget = expected.len() * std::mem::size_of::<V>();
+                it.run(format!("/a load {range} getinterval").as_bytes());
+                assert_eq!(it.st.len(), 1, "{setup}: {range}");
+                let V::Array(part) = it.st.last().unwrap() else { panic!("intervals must still return arrays") };
+                assert_eq!(part.borrow().iter().map(|v| v.num().unwrap()).collect::<Vec<_>>(), expected);
+                assert_eq!(it.allocation_budget, 0);
+                let (_, _, skipped) = it.b.finish();
+                assert!(skipped.is_empty(), "{setup}: {range}: {skipped:?}");
+            }
+        }
+    }
+
+    /// Interval payloads retain slot order and shallow references to mutable compound values.
+    #[test]
+    fn eps_getinterval_preserves_order_and_shallow_identity() {
+        for setup in ["/a [ 0 [ 11 ] (ab) /tag 9 ] def", "/a [ 0 [ 11 ] (ab) /tag 9 ] cvx def"] {
+            let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+            it.run(setup.as_bytes());
+            let source = it.lookup("a").unwrap().items().unwrap();
+            it.allocation_budget = 4 * std::mem::size_of::<V>();
+            it.run(b"/a load 1 4 getinterval /slice exch def /a load 1 get 0 77 put /a load 2 get 0 122 put slice");
+            let V::Array(part) = it.st.last().unwrap() else { panic!("intervals must still return arrays") };
+            let part = part.borrow();
+            assert_eq!(part.len(), 4);
+            assert!(matches!((&source[1], &part[0]), (V::Array(a), V::Array(b)) if Rc::ptr_eq(a, b) && b.borrow()[0].num() == Some(77.0)));
+            assert!(matches!((&source[2], &part[1]), (V::Str(a), V::Str(b)) if Rc::ptr_eq(a, b) && *b.borrow() == b"zb"));
+            assert!(matches!(&part[2], V::Lit(name) if name.as_ref() == "tag"));
+            assert_eq!(part[3].num(), Some(9.0));
+            assert_eq!(it.allocation_budget, 0);
+            let (_, _, skipped) = it.b.finish();
+            assert!(skipped.is_empty(), "{setup}: {skipped:?}");
+        }
+    }
+
+    /// String intervals keep their existing byte-based bounds, exact charge and refusal behavior.
+    #[test]
+    fn eps_getinterval_preserves_string_budget_and_bounds() {
+        for (range, expected, budget, allowed) in [
+            ("1 2", &b"bc"[..], 2, true),
+            ("1 2", &b"bc"[..], 1, false),
+            ("1 0", &b""[..], 0, true),
+            ("99 99", &b""[..], 0, true),
+            ("9999999999999999999999999999999999999999 9999999999999999999999999999999999999999", &b""[..], 0, true),
+            ("2 9999999999999999999999999999999999999999", &b"cd"[..], 2, true),
+        ] {
+            let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+            it.run(b"/s (abcd) def");
+            it.allocation_budget = budget;
+            it.run(format!("s {range} getinterval").as_bytes());
+            assert_eq!(it.st.len(), usize::from(allowed));
+            if allowed {
+                assert!(matches!(it.st.last(), Some(V::Str(s)) if *s.borrow() == expected));
+                assert_eq!(it.allocation_budget, 0);
+            } else {
+                assert_eq!(it.allocation_budget, budget);
+            }
+            let (_, _, skipped) = it.b.finish();
+            if allowed {
+                assert!(skipped.is_empty(), "{range}: {skipped:?}");
+            } else {
+                assert_eq!(skipped, ["PostScript (allocation limit)"]);
+            }
+        }
+    }
+
+    /// Exhausted string equality must stop execution before subsequent artwork is drawn.
     #[test]
     fn eps_string_comparison_eq_stops_at_exhausted_budget() {
         let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
@@ -2048,6 +2184,7 @@ mod allocation_tests {
         assert_eq!(skipped, ["PostScript (allocation limit)"]);
     }
 
+    /// String inequality must honor the same copy refusal as equality.
     #[test]
     fn eps_string_comparison_ne_stops_at_exhausted_budget() {
         let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
@@ -2059,6 +2196,7 @@ mod allocation_tests {
         assert_eq!(skipped, ["PostScript (allocation limit)"]);
     }
 
+    /// Discarding comparison results must not refund their temporary string-copy charges.
     #[test]
     fn eps_string_comparison_repeated_copies_are_cumulative() {
         for op in ["eq", "ne"] {
@@ -2073,6 +2211,7 @@ mod allocation_tests {
         }
     }
 
+    /// Preserve lenient cross-type, lossy UTF-8, empty-key and compound-identity comparisons.
     #[test]
     fn eps_string_comparison_preserves_existing_equality_semantics() {
         // These are compatibility controls, including lenient cross-type and lossy-UTF-8
@@ -2117,6 +2256,7 @@ mod allocation_tests {
         }
     }
 
+    /// Each UTF-8 conversion must fit before copying, while short-circuited operands cost nothing.
     #[test]
     fn eps_string_comparison_charges_each_lossy_copy_before_conversion() {
         for op in ["eq", "ne"] {
@@ -2147,6 +2287,7 @@ mod allocation_tests {
         }
     }
 
+    /// A comparison resource quit must escape `stopped` while retaining earlier artwork.
     #[test]
     fn eps_string_comparison_quit_inside_stopped_preserves_prior_artwork() {
         for op in ["eq", "ne"] {
@@ -2160,6 +2301,7 @@ mod allocation_tests {
         }
     }
 
+    /// The executable-string estimate must still admit nested procedures and ASCII85 zero groups.
     #[test]
     fn eps_cvx_accepts_nested_procedures_and_ascii85_zero_expansion() {
         let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
@@ -2169,6 +2311,7 @@ mod allocation_tests {
         assert!(skipped.is_empty(), "{skipped:?}");
     }
 
+    /// Constructors, intervals and conversions must each refuse an over-budget runtime payload.
     #[test]
     fn eps_runtime_copies_share_the_allocation_budget() {
         // A reduced private counter exercises the real operators without large allocations.
@@ -2200,6 +2343,7 @@ mod allocation_tests {
         assert!(missed.is_empty(), "unbudgeted operator allocations: {missed:?}");
     }
 
+    /// Read-side snapshots, matrix values and encodings must share the runtime payload cap.
     #[test]
     fn eps_runtime_read_snapshots_share_the_allocation_budget() {
         let mut missed = vec![];
@@ -2225,6 +2369,7 @@ mod allocation_tests {
         assert!(missed.is_empty(), "unbudgeted payloads: {missed:?}");
     }
 
+    /// Numeric `copy` must charge all new operand slots before extending the stack.
     #[test]
     fn eps_numeric_copy_charges_new_operand_slots() {
         let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
@@ -2237,6 +2382,7 @@ mod allocation_tests {
         assert!(nodes.is_empty());
     }
 
+    /// Small built-in strings must accumulate charges just like explicit string constructors.
     #[test]
     fn eps_small_runtime_strings_share_the_allocation_budget() {
         let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
@@ -2247,6 +2393,7 @@ mod allocation_tests {
         assert!(nodes.is_empty());
     }
 
+    /// Exact stack limits must preserve operand order, shared arrays and consume-first `astore`.
     #[test]
     fn eps_stack_boundaries_preserve_order_and_compound_identity() {
         let nums = |it: &Interp| it.st.iter().map(|v| v.num().unwrap()).collect::<Vec<_>>();
@@ -2275,6 +2422,7 @@ mod allocation_tests {
         assert!(skipped.is_empty(), "{skipped:?}");
     }
 
+    /// Array slots and string bytes must consume one counter without refunds on overwrite or drop.
     #[test]
     fn eps_mixed_payloads_exhaust_one_budget_without_refunds() {
         let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
@@ -2289,6 +2437,7 @@ mod allocation_tests {
         assert_eq!(skipped, ["PostScript (allocation limit)"]);
     }
 
+    /// `aload` must check its whole result, including the array, before cloning or charging slots.
     #[test]
     fn eps_aload_refuses_before_cloning_or_pushing_items() {
         let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
@@ -2302,6 +2451,7 @@ mod allocation_tests {
         assert_eq!(skipped, ["PostScript (operand stack limit)"]);
     }
 
+    /// An overflowing numeric `copy` must leave both stack contents and allocation budget intact.
     #[test]
     fn eps_copy_refuses_before_extending_the_stack() {
         let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
@@ -2314,6 +2464,7 @@ mod allocation_tests {
         assert_eq!(skipped, ["PostScript (operand stack limit)"]);
     }
 
+    /// Repeated discarded payloads must exhaust the cumulative cap despite bounded live storage.
     #[test]
     fn eps_runtime_payload_allocations_are_cumulative() {
         // Only one 1 MB string is live at a time. The reduced counter exercises repeated
@@ -2326,6 +2477,7 @@ mod allocation_tests {
         assert!(nodes.is_empty(), "execution must stop, not merely discard an allocation");
     }
 
+    /// Length, element and matrix reads must still work when no payload-copy budget remains.
     #[test]
     fn eps_reads_do_not_copy_entire_arrays() {
         let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
