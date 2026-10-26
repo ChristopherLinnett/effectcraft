@@ -397,15 +397,20 @@ fn text_drawn(h: &Harness<'_, EffectcraftApp>, needle: &str) -> (egui::Rect, egu
         .unwrap_or_else(|| panic!("no text with {needle}"))
 }
 
-/// The part of each line number drawn next to `field` that shows.
-fn line_numbers_shown(h: &Harness<'_, EffectcraftApp>, field: egui::Rect) -> Vec<egui::Rect> {
+/// The line numbers next to `field` that show, each with the part of it that shows. Every line's
+/// number is drawn and the clip hides those scrolled out of the field, so a number clipped away
+/// entirely is left out: counted, it would pass for one that shows.
+fn line_numbers_shown(h: &Harness<'_, EffectcraftApp>, field: egui::Rect) -> Vec<(u32, egui::Rect)> {
     let mut out = vec![];
     for cs in &h.output().shapes {
         if let egui::epaint::Shape::Text(ts) = &cs.shape
-            && ts.galley.text().parse::<u32>().is_ok()
+            && let Ok(n) = ts.galley.text().parse::<u32>()
             && (ts.visual_bounding_rect().center().x - field.min.x).abs() < 40.0
         {
-            out.push(cs.clip_rect.intersect(ts.visual_bounding_rect()));
+            let shown = cs.clip_rect.intersect(ts.visual_bounding_rect());
+            if shown.is_positive() {
+                out.push((n, shown));
+            }
         }
     }
     out
@@ -431,19 +436,22 @@ fn wheel_by(h: &mut Harness<'_, EffectcraftApp>, at: Pos2, delta: egui::Vec2) {
 
 /// #1396: an expression taller than its field scrolls inside it. No line is drawn over the rows
 /// below (past the ninth line the text used to run under the next rows, cut off and unreadable),
-/// a scroll handle shows there is more, the wheel over the field scrolls the text rather than the
-/// Timeline, and the last line can be brought into view.
+/// a scroll handle shows there is more, the wheel over the field scrolls the text and its line
+/// numbers rather than the Timeline, and the last line can be brought into view.
 #[test]
 fn a_long_expression_scrolls_inside_its_field() {
     let (mut h, _) = harness();
     let (layer, position) = with_expression(&mut h, "position", BOUNCE);
     let field = rect_of(&h, &format!("timeline.prop.{position}.expression"));
     let inside = |r: egui::Rect| !r.is_positive() || field.expand(1.0).contains_rect(r);
+    // The field is eight rows tall (a longer expression grows its field to eight lines) and a line
+    // of the default font fits a row, so at least eight line numbers show however it's scrolled.
+    let numbers_show = |numbers: &[(u32, egui::Rect)]| numbers.len() >= 8 && numbers.iter().all(|(_, r)| inside(*r));
     let (laid_out, shown) = text_drawn(&h, "oscillation");
     assert!(laid_out.height() > field.height() + 100.0, "the text is taller than its field");
     assert!(inside(shown), "the text shows only in its field {field:?}: {shown:?}");
     let numbers = line_numbers_shown(&h, field);
-    assert!(numbers.len() >= 8 && numbers.iter().all(|r| inside(*r)), "the line numbers show only in the field: {numbers:?}");
+    assert!(numbers_show(&numbers), "the line numbers show only in the field: {numbers:?}");
     let handle = h.output().shapes.iter().any(|cs| match &cs.shape {
         egui::epaint::Shape::Rect(r) => r.fill.a() > 0 && field.contains_rect(r.rect) && r.rect.min.x > field.max.x - 12.0 && r.rect.height() < field.height(),
         _ => false,
@@ -459,7 +467,9 @@ fn a_long_expression_scrolls_inside_its_field() {
     assert!(scrolled.min.y < laid_out.min.y - 100.0, "the text scrolled up: {scrolled:?} from {laid_out:?}");
     // ...down to its last line.
     assert!(scrolled.max.y <= field.max.y + 1.0, "the last line shows: {scrolled:?} in {field:?}");
-    assert!(inside(shown) && line_numbers_shown(&h, field).iter().all(|r| inside(*r)), "still only in the field");
+    let numbers = line_numbers_shown(&h, field);
+    assert!(inside(shown) && numbers_show(&numbers), "still only in the field: {numbers:?}");
+    assert!(numbers.iter().any(|(n, _)| *n as usize == BOUNCE.lines().count()), "the line numbers scrolled with the text: {numbers:?}");
     // Elsewhere the wheel still scrolls the Timeline.
     let row = center(&h, &format!("timeline.layer.{layer}.row"));
     wheel(&mut h, row, -100.0);
