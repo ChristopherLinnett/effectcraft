@@ -124,9 +124,16 @@ pub(super) fn transform_op(s: &mut Session, p: &Value) -> Result<Value> {
                         "fitHeight" => (ch / h, ch / h),
                         _ => (cw / w, ch / h),
                     };
+                    // Painted bounds past what f64 can fit (so small the scale overflows, or so
+                    // wide or far out the size or centre does) are left alone, like empty ones,
+                    // rather than failing the fit of the rest of the selection.
+                    let scale = [sx * 100.0, sy * 100.0];
+                    if ![w, h, scale[0], scale[1], anchor[0], anchor[1]].iter().all(|v| v.is_finite()) {
+                        continue;
+                    }
                     let z = |m: &str, d: f64| tr.get(m).map(|p| p.value_at(lt).as_vec3()[2]).unwrap_or(d);
                     let (sz, az) = (z("scale", 100.0), z("anchor", 0.0));
-                    set(tr, "scale", KV::Vec3([sx * 100.0, sy * 100.0, sz]));
+                    set(tr, "scale", KV::Vec3([scale[0], scale[1], sz]));
                     update_position(tr, lt, |p| [cw / 2.0, ch / 2.0, p[2]]);
                     set(tr, "anchor", KV::Vec3([anchor[0], anchor[1], az]));
                 }

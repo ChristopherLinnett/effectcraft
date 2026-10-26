@@ -1192,6 +1192,31 @@ fn fit_to_comp_sizes_a_shape_by_the_paint_it_shows() {
 }
 
 #[test]
+fn fit_to_comp_skips_painted_bounds_with_no_finite_fit() {
+    let mut s = comp();
+    let close = |x: f64, y: f64| (x - y).abs() < 1e-6;
+    // Each has painted bounds, but no transform within f64 fits them: so small that the scale
+    // overflows, so far out that the centre does, or so wide that the width does. Like a layer
+    // with empty bounds, each is left as it is, and the rest of the selection is still fitted.
+    let cases = [
+        ("tiny", rects_layer(&mut s, &[([1e-305, 1e-305], [0.0, 0.0], 100.0)])),
+        ("far", rects_layer(&mut s, &[([1e300, 1e300], [1.7e308, 0.0], 100.0)])),
+        ("wide", rects_layer(&mut s, &[([1.0, 1.0], [-1e308, 0.0], 100.0), ([1.0, 1.0], [1e308, 0.0], 100.0)])),
+    ];
+    let fits = rects_layer(&mut s, &[([180.0, 80.0], [0.0, 0.0], 100.0)]);
+    let before: Vec<_> = cases.iter().map(|(_, l)| layer(&s, *l).transform().unwrap().clone()).collect();
+    let all: Vec<u64> = cases.iter().map(|(_, l)| *l).chain([fits]).collect();
+    for op in ["fit", "fitWidth", "fitHeight"] {
+        s.execute("layer.transform", json!({"layers": all, "op": op})).unwrap();
+        for ((name, l), was) in cases.iter().zip(&before) {
+            assert_eq!(layer(&s, *l).transform().unwrap(), was, "{op}: the {name} layer is left as it was");
+        }
+    }
+    let scale = layer(&s, fits).transform().unwrap().get("scale").unwrap().value.as_vec3();
+    assert!(close(scale[0], 360.0 / 80.0 * 100.0) && close(scale[1], scale[0]), "fitHeight still fitted the other layer: {scale:?}");
+}
+
+#[test]
 fn duplicated_and_pasted_layers_keep_their_links() {
     let mut s = comp();
     let parent = solid(&mut s, "#ff0000");
