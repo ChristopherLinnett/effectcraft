@@ -383,34 +383,38 @@ fn rect_of(h: &Harness<'_, EffectcraftApp>, id: &str) -> egui::Rect {
     egui::Rect::from_min_size(pos2(e.rect[0], e.rect[1]), egui::vec2(e.rect[2], e.rect[3]))
 }
 
-/// The text drawn containing `needle`: where it is laid out, and the part of it that shows.
+/// The part of text `ts`, drawn under `clip`, that shows: none when the clip hides all of it.
+/// Clipped away entirely, it leaves an empty rect that would pass for one inside any field.
+fn part_shown(clip: egui::Rect, ts: &egui::epaint::TextShape) -> Option<egui::Rect> {
+    Some(clip.intersect(ts.visual_bounding_rect())).filter(|r| r.is_positive())
+}
+
+/// The text drawn containing `needle`: where it is laid out, and the part of it that shows (some
+/// of it must).
+#[track_caller]
 fn text_drawn(h: &Harness<'_, EffectcraftApp>, needle: &str) -> (egui::Rect, egui::Rect) {
-    h.output()
-        .shapes
-        .iter()
-        .find_map(|cs| match &cs.shape {
-            egui::epaint::Shape::Text(ts) if ts.galley.text().contains(needle) => {
-                Some((ts.visual_bounding_rect(), cs.clip_rect.intersect(ts.visual_bounding_rect())))
-            }
-            _ => None,
-        })
-        .unwrap_or_else(|| panic!("no text with {needle}"))
+    let drawn = h.output().shapes.iter().find_map(|cs| match &cs.shape {
+        egui::epaint::Shape::Text(ts) if ts.galley.text().contains(needle) => Some((ts.visual_bounding_rect(), part_shown(cs.clip_rect, ts))),
+        _ => None,
+    });
+    match drawn {
+        Some((laid_out, Some(shown))) => (laid_out, shown),
+        Some((laid_out, None)) => panic!("the text with {needle} is drawn but none of it shows: {laid_out:?}"),
+        None => panic!("no text with {needle}"),
+    }
 }
 
 /// The line numbers next to `field` that show, each with the part of it that shows. Every line's
-/// number is drawn and the clip hides those scrolled out of the field, so a number clipped away
-/// entirely is left out: counted, it would pass for one that shows.
+/// number is drawn, and the clip hides those scrolled out of the field.
 fn line_numbers_shown(h: &Harness<'_, EffectcraftApp>, field: egui::Rect) -> Vec<(u32, egui::Rect)> {
     let mut out = vec![];
     for cs in &h.output().shapes {
         if let egui::epaint::Shape::Text(ts) = &cs.shape
             && let Ok(n) = ts.galley.text().parse::<u32>()
             && (ts.visual_bounding_rect().center().x - field.min.x).abs() < 40.0
+            && let Some(shown) = part_shown(cs.clip_rect, ts)
         {
-            let shown = cs.clip_rect.intersect(ts.visual_bounding_rect());
-            if shown.is_positive() {
-                out.push((n, shown));
-            }
+            out.push((n, shown));
         }
     }
     out
@@ -443,7 +447,7 @@ fn a_long_expression_scrolls_inside_its_field() {
     let (mut h, _) = harness();
     let (layer, position) = with_expression(&mut h, "position", BOUNCE);
     let field = rect_of(&h, &format!("timeline.prop.{position}.expression"));
-    let inside = |r: egui::Rect| !r.is_positive() || field.expand(1.0).contains_rect(r);
+    let inside = |r: egui::Rect| field.expand(1.0).contains_rect(r);
     // The field is eight rows tall (a longer expression grows its field to eight lines) and a line
     // of the default font fits a row, so at least eight line numbers show however it's scrolled.
     let numbers_show = |numbers: &[(u32, egui::Rect)]| numbers.len() >= 8 && numbers.iter().all(|(_, r)| inside(*r));
