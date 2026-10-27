@@ -14,6 +14,13 @@ pub(super) const MAX_SAVE_DEPTH: usize = 1024;
 /// The most operands retained on the operand stack.
 pub(super) const MAX_STACK: usize = 100_000;
 
+/// The longest name, and dictionary key, in bytes. Hashing or comparing one is then bounded work
+/// for a single operation, however often a loop repeats it. PostScript's own limit is 127
+/// characters (PostScript Language Reference, 3rd ed., Appendix B), which conforming interpreters
+/// enforce with `limitcheck`; 255 is the longest token a DSC-conforming line can hold, so even
+/// image data this interpreter cannot step over, read as names, stays within it.
+pub(super) const MAX_NAME: usize = 255;
+
 /// Runtime compound payloads, excluding source tokens, graphics, fonts and container overhead.
 const MAX_ALLOCATION: usize = 256 * 1024 * 1024;
 
@@ -57,12 +64,32 @@ impl Interp {
 
     pub fn run(&mut self, data: &[u8]) {
         self.embedded = embedded_fonts(data);
-        let mut src = Src { d: data, pos: 0 };
-        while let Some(t) = src.token(0) {
+        let mut src = Src::new(data);
+        while let Ok(Some(t)) = self.next_token(&mut src) {
             if let Err(Flow::Quit) = self.exec_token(t, &mut src) {
                 break;
             }
         }
+    }
+
+    /// The next token of `src`, or none at its end. A name longer than [`MAX_NAME`] stops the
+    /// program there ([`Self::name_fits`]).
+    pub(super) fn next_token(&mut self, src: &mut Src) -> Result<Option<V>, Flow> {
+        let t = src.token(0);
+        if let Some(len) = src.long_name {
+            self.name_fits(len)?;
+        }
+        Ok(t)
+    }
+
+    /// Stop the program when a name or dictionary key of `len` bytes would be longer than
+    /// [`MAX_NAME`].
+    pub(super) fn name_fits(&mut self, len: usize) -> Result<(), Flow> {
+        if len <= MAX_NAME {
+            return Ok(());
+        }
+        self.b.skip("PostScript (name length limit)");
+        Err(Flow::Quit)
     }
 
     pub(super) fn pop(&mut self) -> V {
@@ -114,22 +141,34 @@ impl Interp {
         Ok(v.items().unwrap_or_default())
     }
 
-    /// A copy of the key text `v` names (what a conversion such as `cvs` or `cvn` keeps), its
-    /// exact length charged before the copy is made. The text is read in place for a name or a
-    /// UTF-8 string; a number, a boolean or a string that isn't UTF-8 is converted first.
+    /// A copy of the key text `v` names (what `cvs` keeps), its exact length charged before the
+    /// copy is made. The text is read in place for a name or a UTF-8 string; a number, a boolean
+    /// or a string that isn't UTF-8 is converted first.
     pub(super) fn converted_key<T: for<'a> From<&'a str>>(&mut self, v: &V) -> Result<T, Flow> {
+        v.with_key(|t| self.copied_text(t))
+    }
+
+    /// [`Self::converted_key`] for text that becomes a name (`cvn`, an operator `load` makes, a
+    /// font's name): longer than [`MAX_NAME`] stops the program instead.
+    pub(super) fn converted_name<T: for<'a> From<&'a str>>(&mut self, v: &V) -> Result<T, Flow> {
         v.with_key(|t| {
-            self.allocate(t.len())?;
-            Ok(T::from(t))
+            self.name_fits(t.len())?;
+            self.copied_text(t)
         })
     }
 
+    /// A copy of `t`, its length charged first.
+    fn copied_text<T: for<'a> From<&'a str>>(&mut self, t: &str) -> Result<T, Flow> {
+        self.allocate(t.len())?;
+        Ok(T::from(t))
+    }
+
     /// The name `v` stands for: a name's own text, shared at no cost, else a copy of its key text
-    /// ([`Self::converted_key`]).
+    /// ([`Self::converted_name`]).
     pub(super) fn name_of(&mut self, v: &V) -> Result<Rc<str>, Flow> {
         match v {
             V::Name(n) | V::Lit(n) | V::Op(n) => Ok(n.clone()),
-            other => self.converted_key(other),
+            other => self.converted_name(other),
         }
     }
 
@@ -145,31 +184,32 @@ impl Interp {
         self.allocate(k.len().saturating_add(DICT_ENTRY))
     }
 
-    /// Charge a string operand's worst-case scan before it is hashed or compared as a dictionary
-    /// key, in `eq`, or on a lookup. Hashing or comparing reads every byte, so a huge string key
-    /// would otherwise do work that scales with its length for a single operation (a lookup or an
-    /// overwrite in a loop). A name is read in place and shared, so it costs nothing.
+    /// Charge a key-bearing operand's scan before it is hashed or compared as a dictionary key, a
+    /// lookup name or in `eq`: a string at its worst-case lossy UTF-8 length, a name at its own
+    /// length ([`V::key_bytes`]). Hashing or comparing reads every byte, so a long one would
+    /// otherwise do work that scales with its length for a single operation (a lookup or an
+    /// overwrite in a loop).
     pub(super) fn charge_scan(&mut self, v: &V) -> Result<(), Flow> {
-        if let V::Str(_) = v {
-            self.allocate(v.key_bytes())?;
+        match v {
+            V::Str(_) | V::Name(_) | V::Lit(_) | V::Op(_) => self.allocate(v.key_bytes()),
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     /// Put `v` in `d` under the key `k` names. A key `d` already has keeps its entry, and only its
-    /// value is replaced: the hash reads the whole key, so a big string key's scan is charged
-    /// ([`Self::charge_scan`]). A new key is an entry the dictionary keeps, which reads the key
-    /// once as it is stored and is charged in full ([`Self::charge_entry`]).
+    /// value is replaced, charging the scan that finds it ([`Self::charge_scan`]). A new key, at
+    /// most [`MAX_NAME`] bytes, is an entry the dictionary keeps, which reads the key once as it is
+    /// stored and is charged in full ([`Self::charge_entry`]).
     pub(super) fn dict_insert(&mut self, d: &DictRef, k: &V, v: V) -> Result<(), Flow> {
-        let scan = if let V::Str(_) = k { k.key_bytes() } else { 0 };
         k.with_key(|t| {
             if d.borrow().contains_key(t) {
-                self.allocate(scan)?;
+                self.charge_scan(k)?;
                 if let Some(slot) = d.borrow_mut().get_mut(t) {
                     *slot = v;
                 }
                 return Ok(());
             }
+            self.name_fits(t.len())?;
             self.charge_entry(t)?;
             d.borrow_mut().insert(t.to_owned(), v);
             Ok(())
@@ -200,9 +240,8 @@ impl Interp {
         self.allocate(dash.saturating_mul(std::mem::size_of::<f64>()))
     }
 
-    /// Precharge a string's worst-case lossy UTF-8 copy ([`Self::charge_scan`]) before producing
-    /// the existing equality key. A name's key is copied only for the comparison, and names are
-    /// outside the payload budget.
+    /// Precharge the copy an equality key makes ([`Self::charge_scan`]): a string's worst-case lossy
+    /// UTF-8 copy, a name's own length.
     pub(super) fn comparison_key(&mut self, v: &V) -> Result<String, Flow> {
         self.charge_scan(v)?;
         Ok(v.key())

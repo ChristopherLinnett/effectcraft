@@ -326,7 +326,7 @@ impl Interp {
                 let v = match k.with_key(|t| self.lookup(t)) {
                     Some(v) => v,
                     // The operator keeps the whole name, however long the file made it.
-                    None => V::Op(self.converted_key(&k)?),
+                    None => V::Op(self.converted_name(&k)?),
                 };
                 self.push(v);
             }
@@ -531,9 +531,9 @@ impl Interp {
                     // conservative bound before parsing.
                     self.allocate(s.borrow().len().saturating_mul(std::mem::size_of::<V>() + 5))?;
                     let bytes = s.borrow().clone();
-                    let mut sub = Src { d: &bytes, pos: 0 };
+                    let mut sub = Src::new(&bytes);
                     let mut body = vec![];
-                    while let Some(t) = sub.token(0) {
+                    while let Some(t) = self.next_token(&mut sub)? {
                         body.push(t);
                     }
                     self.push(V::Proc(Rc::new(body)));
@@ -550,7 +550,7 @@ impl Interp {
             },
             "cvn" => {
                 let v = self.pop();
-                let k = self.converted_key(&v)?;
+                let k = self.converted_name(&v)?;
                 self.push(V::Lit(k));
             }
             "cvs" => {

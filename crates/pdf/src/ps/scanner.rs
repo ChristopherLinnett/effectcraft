@@ -1,3 +1,4 @@
+use super::exec::MAX_NAME;
 use super::value::V;
 use super::*;
 
@@ -5,9 +6,23 @@ use super::*;
 pub(super) struct Src<'a> {
     pub(super) d: &'a [u8],
     pub(crate) pos: usize,
+    /// The length of a name longer than [`MAX_NAME`], once one is read: tokenizing stops there.
+    pub(super) long_name: Option<usize>,
 }
 
-impl Src<'_> {
+impl<'a> Src<'a> {
+    pub(super) fn new(d: &'a [u8]) -> Src<'a> {
+        Src { d, pos: 0, long_name: None }
+    }
+
+    /// `text` as a name, or none when it is longer than [`MAX_NAME`] (noted in `long_name`).
+    fn name(&mut self, text: String) -> Option<Rc<str>> {
+        if text.len() > MAX_NAME {
+            self.long_name = Some(text.len());
+            return None;
+        }
+        Some(text.into())
+    }
     fn skip_ws(&mut self) {
         while self.pos < self.d.len() {
             let c = self.d[self.pos];
@@ -91,8 +106,9 @@ impl Src<'_> {
                     self.pos += 1;
                 }
                 let w = String::from_utf8_lossy(self.word()).into_owned();
+                let w = self.name(w)?;
                 // `//name` (immediately evaluated) is treated like a plain name.
-                if imm { V::Name(w.into()) } else { V::Lit(w.into()) }
+                if imm { V::Name(w) } else { V::Lit(w) }
             }
             b'(' => {
                 self.pos += 1;
@@ -195,7 +211,7 @@ impl Src<'_> {
                         let s = String::from_utf8_lossy(w).into_owned();
                         match s.split_once('#').and_then(|(r, v)| i64::from_str_radix(v, r.parse::<u32>().ok().filter(|r| (2..=36).contains(r))?).ok()) {
                             Some(n) => V::Num(n as f64),
-                            None => V::Name(s.into()),
+                            None => V::Name(self.name(s)?),
                         }
                     }
                 }

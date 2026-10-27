@@ -65,7 +65,7 @@ impl Interp {
             return Ok(d);
         }
         // The new font keeps its name, once, as FontName and as the program to draw it with.
-        let name: Rc<str> = self.converted_key(k)?;
+        let name: Rc<str> = self.converted_name(k)?;
         let d = new_dict();
         let entries = [
             ("FontName", V::Lit(name.clone())),
@@ -217,7 +217,7 @@ impl Interp {
                     if !d.borrow().contains_key("__base") {
                         // A font the file defines itself: its embedded program, by name, which
                         // the font keeps as its own copy.
-                        let name = self.converted_key(&key)?;
+                        let name = self.converted_name(&key)?;
                         self.dict_insert(d, &V::Lit("__base".into()), V::Lit(name))?;
                         let matrix = self.matrix(Affine::IDENTITY)?;
                         self.dict_insert(d, &V::Lit("__m".into()), matrix)?;

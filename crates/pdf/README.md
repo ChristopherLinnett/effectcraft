@@ -127,6 +127,10 @@ ffmpeg elsewhere) to check the code tables against an independent implementation
   complete result before copying; exceeding it stops execution with an operand-stack-limit
   note in `Doc::skipped`, keeping artwork already drawn. `astore` consumes its operands before
   returning its array, so it does not increase stack depth.
+  Every operator obeys one rule, so that a hostile file cannot make a single operation do work
+  out of proportion to it: the memory the operator keeps is charged to the allocation budget, and
+  its running time is either bounded by a constant or paid for in proportion to the bytes or
+  elements it touches — the operation counter for the work, the allocation budget for the memory.
   Runtime payloads have a cumulative 256 MiB allocation budget, never refunded when an object
   is dropped or overwritten. What an operator keeps is charged before it is allocated: array and
   procedure slots at `size_of::<V>()`, string bytes, and kept text at its exact length (a
@@ -139,23 +143,33 @@ ffmpeg elsewhere) to check the code tables against an independent implementation
   copies. A dictionary charges a new entry once — its key text and a fixed slot for the key's
   `String` and the value (`def`, `store`, `put`, `>>`, `defineresource`, `definefont`, a new font
   for `findfont` or `selectfont`, and the per-key copies `scalefont`, `makefont` and `selectfont`
-  make); replacing an existing key's value reuses the entry and costs nothing. Hashing or
-  comparing a string used as a dictionary key, a lookup name (`get`, `known`, `load`, `where`,
-  `undef`), a font name (`findfont`, `selectfont`), or an `eq` operand reads every byte, so each
-  such operation charges the string's worst-case scan; a name is read in place and costs nothing.
-  `load` of an undefined name charges the name its operator keeps. A font built for drawing (by
-  its base name and the first 256 glyph names of its encoding, or the one glyph `glyphshow` draws)
-  charges the font, its glyph-name table and its cache key, once; drawing with it again charges
-  only the string shown, and a string font or glyph name is copied, and charged, each time it is
-  used. Constructor limits remain 1,000,000 array slots and 10,000,000 string bytes, and at most
-  1,024 graphics-state copies (`gsave`, `save`) are kept at once. Reaching a limit stops
-  execution with a note (allocation limit, graphics state depth limit) rather than continuing
-  with partial results.
+  make); replacing an existing key's value reuses the entry. Hashing or comparing a key reads
+  every byte, so looking one up (`get`, `known`, `load`, `where`, `undef`, `store`, `findfont`,
+  `selectfont`), replacing its value, or comparing it with `eq` charges its scan: a string at its
+  worst-case lossy UTF-8 length, a name at its own length. `load` of an undefined name charges the
+  name its operator keeps. A font built for drawing (by its base name and the first 256 glyph
+  names of its encoding, or the one glyph `glyphshow` draws) charges the font, its glyph-name
+  table and its cache key, once; drawing with it again charges only the string shown, and a
+  string font or glyph name is copied, and charged, each time it is used. Constructor limits
+  remain 1,000,000 array slots and 10,000,000 string bytes, and at most 1,024 graphics-state
+  copies (`gsave`, `save`) are kept at once.
+  Names and dictionary keys are at most 255 bytes, however they are made: read from the file or
+  an executable string, converted by `cvn`, made by `load`, `findfont`, `definefont` or
+  `glyphshow` from a string, or a string or number used as a new key. Executing a name looks it
+  up in every dictionary on the stack without a charge, so this bound is what keeps one operation
+  cheap however long a loop runs (8,000,000 operations against 64 dictionaries take about two
+  seconds). PostScript's own limit is 127 characters (PostScript Language Reference, 3rd ed.,
+  Appendix B), which conforming interpreters enforce with `limitcheck`; 255 is the longest token
+  a DSC-conforming line can hold, so image data this interpreter cannot step over, read as names,
+  stays within it. The seventeen reference files this was checked against create names of at most
+  85 bytes, and real generator output at most 28.
+  Reaching a limit stops execution with a note (allocation limit, graphics state depth limit,
+  name length limit) rather than continuing with partial results.
   This is not a process-memory guarantee. Outside the budget: source tokens (the file's names
   and strings) and the embedded font programs read from it; the operand stack (at most 100,000
-  values); name lookup keys, read in place; paths, including those in graphics-state copies,
-  which the operation and path limits bound; drawn output; font program internals; a hash table's
-  spare buckets and a vector's spare capacity, and allocator overhead.
+  values); executing a name, which the name length limit bounds; paths, including those in
+  graphics-state copies, which the operation and path limits bound; drawn output; font program
+  internals; a hash table's spare buckets and a vector's spare capacity, and allocator overhead.
 - **Create Shapes from Vector Layer:** clips that enclose the whole page become layer masks
   (the first clip Add, later ones Intersect). Nested clipping groups become Merge Paths: each
   closed shape inside them is a group with its geometry merged into one compound path, the clip

@@ -1,7 +1,8 @@
-use super::exec::MAX_STACK;
+use super::exec::{MAX_NAME, MAX_STACK};
 use super::*;
 
-/// Repeated short array/procedure slices spend only their returned slots, not source snapshots.
+/// Repeated short array/procedure slices spend only their returned slots, not source snapshots
+/// (and each `load` the scan of the name `a`).
 #[test]
 fn eps_getinterval_short_slices_charge_only_returned_slots() {
     let mut failures = vec![];
@@ -9,7 +10,7 @@ fn eps_getinterval_short_slices_charge_only_returned_slots() {
         let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
         it.run(setup.as_bytes());
         assert_eq!(it.lookup("a").unwrap().item_count(), 4096);
-        it.allocation_budget = 3 * std::mem::size_of::<V>();
+        it.allocation_budget = 3 * (std::mem::size_of::<V>() + "a".len());
         it.run(b"3 { /a load 17 1 getinterval pop } repeat 0 0 10 10 rectfill");
         let left = it.allocation_budget;
         let (nodes, _, skipped) = it.b.finish();
@@ -27,7 +28,8 @@ fn eps_getinterval_refuses_only_the_slice_that_exceeds_the_budget() {
         let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
         it.run(setup.as_bytes());
         it.run(b"0 0 10 10 rectfill");
-        it.allocation_budget = 3 * std::mem::size_of::<V>() - 1;
+        // Three slices and the three `load`s of `a` that fetch them, one byte short.
+        it.allocation_budget = 3 * (std::mem::size_of::<V>() + "a".len()) - 1;
         it.run(b"{ 3 { /a load 17 1 getinterval } repeat } stopped 20 20 10 10 rectfill");
         assert_eq!(it.st.len(), 2, "{setup}: only two complete slices fit");
         assert!(it.st.iter().all(|v| matches!(v, V::Array(_)) && v.item_count() == 1));
@@ -53,7 +55,7 @@ fn eps_getinterval_clamps_compound_bounds_before_charging() {
         ] {
             let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
             it.run(setup.as_bytes());
-            it.allocation_budget = expected.len() * std::mem::size_of::<V>();
+            it.allocation_budget = expected.len() * std::mem::size_of::<V>() + "a".len();
             it.run(format!("/a load {range} getinterval").as_bytes());
             assert_eq!(it.st.len(), 1, "{setup}: {range}");
             let V::Array(part) = it.st.last().unwrap() else { panic!("intervals must still return arrays") };
@@ -72,8 +74,9 @@ fn eps_getinterval_preserves_order_and_shallow_identity() {
         let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
         it.run(setup.as_bytes());
         let source = it.lookup("a").unwrap().items().unwrap();
-        // The interval's four slots, and the new entry `slice` the dictionary keeps.
-        it.allocation_budget = 4 * std::mem::size_of::<V>() + "slice".len() + std::mem::size_of::<(String, V)>();
+        // The interval's four slots, the new entry `slice` the dictionary keeps, and three `load`s of
+        // `a`.
+        it.allocation_budget = 4 * std::mem::size_of::<V>() + "slice".len() + std::mem::size_of::<(String, V)>() + 3 * "a".len();
         it.run(b"/a load 1 4 getinterval /slice exch def /a load 1 get 0 77 put /a load 2 get 0 122 put slice");
         let V::Array(part) = it.st.last().unwrap() else { panic!("intervals must still return arrays") };
         let part = part.borrow();
@@ -203,14 +206,16 @@ fn eps_string_comparison_preserves_existing_equality_semantics() {
     }
 }
 
-/// Each UTF-8 conversion must fit before copying, while short-circuited operands cost nothing.
+/// Each UTF-8 conversion must fit before copying, while short-circuited operands cost nothing. A
+/// name operand is charged its length first, so `/same` leaves 7 of 11 bytes, too few for the
+/// string's 12.
 #[test]
 fn eps_string_comparison_charges_each_lossy_copy_before_conversion() {
     for op in ["eq", "ne"] {
         for (operands, budget, left, allowed) in [
             ("(0123456789) (0123456789)", 60, 0, true),
             ("(0123456789) (0123456789)", 59, 29, false),
-            ("/same (same)", 11, 11, false),
+            ("/same (same)", 11, 7, false),
             ("(same) /same", 11, 11, false),
             ("<fffe> <fffe>", 12, 0, true),
             ("<fffe> <fffe>", 11, 5, false),
@@ -478,14 +483,15 @@ fn held_text(v: &V) -> usize {
 /// an array, it never holds more than the budget.
 #[test]
 fn eps_conversions_charge_the_text_they_keep() {
-    let long = "a".repeat(10_000);
-    let budget = 100_000;
+    // The longest name there can be, kept 50 times against room for ten.
+    let long = "a".repeat(MAX_NAME);
+    let budget = 10 * MAX_NAME;
     let mut over = vec![];
     let dict = format!("/d 1 dict def d /{long} 0 put");
-    let string = "/s 10000 string def /i 0 def";
+    let string = format!("/s {MAX_NAME} string def /i 0 def");
     // A new font name each time, from one string: its first byte counts up.
     let next = "s 0 i put /i i 1 add def";
-    let font = "/s 10000 string def /f 1 dict def f s 0 put";
+    let font = format!("/s {MAX_NAME} string def /f 1 dict def f s 0 put");
     for (what, setup, body) in [
         ("load of an undefined name", "", format!("/{long} load")),
         ("load of an undefined string", "", format!("({long}) load")),
@@ -495,14 +501,14 @@ fn eps_conversions_charge_the_text_they_keep() {
         ("cvn of a loaded operator", "", format!("/{long} load cvn")),
         ("cvn of a string", "", format!("({long}) cvn")),
         ("forall over a dictionary's key", dict.as_str(), "d { pop } forall".to_string()),
-        ("put of a string key into new dictionaries", string, "1 dict dup s 0 put".to_string()),
-        ("def of a string key into new dictionaries", string, "1 dict begin s 0 def currentdict end".to_string()),
+        ("put of a string key into new dictionaries", string.as_str(), "1 dict dup s 0 put".to_string()),
+        ("def of a string key into new dictionaries", string.as_str(), "1 dict begin s 0 def currentdict end".to_string()),
         ("def of a name key into new dictionaries", "", format!("1 dict begin /{long} 0 def currentdict end")),
-        ("store of a string key into new dictionaries", string, "1 dict begin s 0 store currentdict end".to_string()),
-        ("<< >> with a string key", string, "<< s 0 >>".to_string()),
-        ("scalefont copies of a font with a long key", font, "f 10 scalefont".to_string()),
-        ("findfont of new font names", string, format!("{next} s findfont")),
-        ("definefont of new font names", string, format!("{next} s 1 dict definefont")),
+        ("store of a string key into new dictionaries", string.as_str(), "1 dict begin s 0 store currentdict end".to_string()),
+        ("<< >> with a string key", string.as_str(), "<< s 0 >>".to_string()),
+        ("scalefont copies of a font with a long key", font.as_str(), "f 10 scalefont".to_string()),
+        ("findfont of new font names", string.as_str(), format!("{next} s findfont")),
+        ("definefont of new font names", string.as_str(), format!("{next} s 1 dict definefont")),
     ] {
         let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
         it.run(setup.as_bytes());
@@ -518,27 +524,28 @@ fn eps_conversions_charge_the_text_they_keep() {
 }
 
 /// A dictionary charges an entry once, when it is added: defining, storing or putting a new value
-/// under the same key again costs nothing more.
+/// under the same key again keeps nothing new and charges only the scan that finds the key, once
+/// for `def` and `put` and twice for `store`, which searches the dictionary stack first.
 #[test]
 fn eps_dictionary_keys_are_charged_once() {
     let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
-    it.allocation_budget = "key".len() + std::mem::size_of::<(String, V)>();
+    it.allocation_budget = "key".len() + std::mem::size_of::<(String, V)>() + 100 * 4 * "key".len();
     it.run(b"/key 0 def 100 { /key 1 def /key 2 store currentdict /key 3 put } repeat 0 0 10 10 rectfill");
-    assert_eq!(it.allocation_budget, 0, "the entry, charged once");
+    assert_eq!(it.allocation_budget, 0, "the entry, charged once, and each overwrite's scan");
     let (nodes, _, skipped) = it.b.finish();
-    assert!(skipped.is_empty() && nodes.len() == 1, "overwrites are free: {skipped:?}");
+    assert!(skipped.is_empty() && nodes.len() == 1, "overwrites keep nothing new: {skipped:?}");
 }
 
 /// `forall` over a dictionary snapshots its entries before running the procedure, each as a key-
 /// value pair whose key is a literal name of its own: the whole snapshot is charged before it is
-/// taken, however early the procedure exits. Five 10 000-byte keys need their 50 000 bytes and the
-/// snapshot's five pairs of slots.
+/// taken, however early the procedure exits. Five keys of the longest length a name can have need
+/// their bytes and the snapshot's five pairs of slots.
 #[test]
 fn eps_forall_charges_the_dictionary_snapshot_first() {
-    let a = "a".repeat(9_999);
+    let a = "a".repeat(MAX_NAME - 1);
     let setup = format!("/d 5 dict def d /{a}0 0 put d /{a}1 0 put d /{a}2 0 put d /{a}3 0 put d /{a}4 0 put");
-    let slots = 5 * 2 * std::mem::size_of::<V>();
-    for (budget, fits) in [(50_000 + slots, true), (50_000 + slots - 1, false)] {
+    let need = 5 * MAX_NAME + 5 * 2 * std::mem::size_of::<V>();
+    for (budget, fits) in [(need, true), (need - 1, false)] {
         let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
         it.run(setup.as_bytes());
         it.allocation_budget = budget;
@@ -569,11 +576,13 @@ fn eps_fonts_charge_their_keys_and_matrices() {
         it.run(ps);
         before - it.allocation_budget
     };
-    // The name, once for the font and once as its Font Directory key; the six dictionary entries
-    // and the Font Directory entry.
-    assert_eq!(spent(&mut it, b"/F findfont pop"), 2 + keys + 12 * slot + 7 * entry, "findfont of a new font");
-    assert_eq!(spent(&mut it, b"/F findfont pop"), 0, "findfont of a known font");
-    assert_eq!(spent(&mut it, b"/F findfont 10 scalefont pop"), keys + 6 * entry + 6 * slot, "scalefont");
+    // Every `findfont` scans the name to look it up. A new font keeps the name, once for the font
+    // and once as its Font Directory key, its six dictionary entries and the Font Directory entry.
+    let scan = "F".len();
+    assert_eq!(spent(&mut it, b"/F findfont pop"), scan + 2 + keys + 12 * slot + 7 * entry, "findfont of a new font");
+    assert_eq!(spent(&mut it, b"/F findfont pop"), scan, "findfont of a known font");
+    // The copy replaces its own `__m`, scanning that key.
+    assert_eq!(spent(&mut it, b"/F findfont 10 scalefont pop"), scan + keys + 6 * entry + 6 * slot + "__m".len(), "scalefont");
     assert_eq!(spent(&mut it, b"/G 1 dict definefont pop"), 2 + "__base".len() + "__m".len() + 6 * slot + 3 * entry, "definefont");
 }
 
@@ -640,13 +649,13 @@ fn eps_text_charges_a_new_fonts_encoding_names_once() {
             size - 1
         )
     };
-    let long = "n".repeat(10_000);
+    let long = "n".repeat(MAX_NAME);
     let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
     it.run(font(&long, 256).as_bytes());
-    it.allocation_budget = 100_000;
+    it.allocation_budget = 100 * MAX_NAME;
     it.run(b"(A) show 0 0 10 10 rectfill");
     let (nodes, _, skipped) = it.b.finish();
-    assert!(nodes.is_empty() && skipped == ["PostScript (allocation limit)"], "256 copies of a 10 000-byte name: {skipped:?}");
+    assert!(nodes.is_empty() && skipped == ["PostScript (allocation limit)"], "256 copies of the longest name: {skipped:?}");
 
     // An encoding longer than 256 entries is cached by its first 256: what a font reads.
     for size in [256, 1_000_000] {
@@ -661,47 +670,36 @@ fn eps_text_charges_a_new_fonts_encoding_names_once() {
     }
 }
 
-/// Hashing or comparing a string used as a dictionary key, a lookup name, or a font name reads
-/// every byte, so each such operation charges the string's worst-case scan: a loop over one big
-/// string key does bounded work. A name, shared in place, costs nothing.
+/// Hashing or comparing a key reads every byte, so each operation that looks one up, overwrites
+/// it or compares it charges its scan: a string at its worst-case lossy UTF-8 length, a name at
+/// its own length. A loop over one long key does bounded work.
 #[test]
-fn eps_string_key_scans_are_charged() {
-    let scan = 1000 * 3; // The worst-case lossy UTF-8 length a 1 000-byte string could scan to.
-    for (what, setup, op) in [
-        ("known", "/d 1 dict def /s 1000 string def d s 0 put", "d s known pop"),
-        ("get", "/d 1 dict def /s 1000 string def d s 0 put", "d s get pop"),
-        ("put overwrite", "/d 1 dict def /s 1000 string def d s 0 put", "d s 1 put"),
-        ("where", "/s 1000 string def s 0 def", "s where pop"),
-        ("load", "/s 1000 string def s 0 def", "s load pop"),
-        ("findfont hit", "/s 1000 string def s findfont pop", "s findfont pop"),
-    ] {
-        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
-        it.run(setup.as_bytes());
-        let before = it.allocation_budget;
-        it.run(op.as_bytes());
-        assert_eq!(before - it.allocation_budget, scan, "{what} charges the key scan");
-    }
-    // The same operations on a name key read it in place and keep nothing, so they cost nothing.
-    for (what, setup, op) in [
-        ("known", "/d 1 dict def /k 0 def", "d /k known pop"),
-        ("get", "/d 1 dict def d /k 0 put", "d /k get pop"),
-        ("put overwrite", "/d 1 dict def d /k 0 put", "d /k 1 put"),
-        ("where", "/k 0 def", "/k where pop"),
-        ("load", "/k 0 def", "/k load pop"),
-        ("findfont hit", "/k findfont pop", "/k findfont pop"),
-    ] {
-        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
-        it.run(setup.as_bytes());
-        let before = it.allocation_budget;
-        it.run(op.as_bytes());
-        assert_eq!(before - it.allocation_budget, 0, "{what} on a name copies nothing");
+fn eps_key_scans_are_charged() {
+    let name = "k".repeat(MAX_NAME);
+    let string = format!("/s {MAX_NAME} string def");
+    for (key, setup, scan) in [("s", string.as_str(), 3 * MAX_NAME), (&*format!("/{name}"), "", MAX_NAME)] {
+        for (what, define, op, scans) in [
+            ("known", format!("/d 1 dict def d {key} 0 put"), format!("d {key} known pop"), 1),
+            ("get", format!("/d 1 dict def d {key} 0 put"), format!("d {key} get pop"), 1),
+            ("put overwrite", format!("/d 1 dict def d {key} 0 put"), format!("d {key} 1 put"), 1),
+            ("where", format!("{key} 0 def"), format!("{key} where pop"), 1),
+            ("load", format!("{key} 0 def"), format!("{key} load pop"), 1),
+            ("findfont hit", format!("{key} findfont pop"), format!("{key} findfont pop"), 1),
+            ("eq", String::new(), format!("{key} {key} eq pop"), 2),
+        ] {
+            let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+            it.run(format!("{setup} {define}").as_bytes());
+            let before = it.allocation_budget;
+            it.run(op.as_bytes());
+            assert_eq!(before - it.allocation_budget, scans * scan, "{what} of {key:.8} charges its scan");
+        }
     }
 }
 
 /// `glyphshow` with no current font drops its operand and copies nothing. With a font set, a
-/// string glyph name is copied for the cache key each call, and a string font name is copied on
-/// every show, so a loop over a huge one stops at the allocation limit rather than copying without
-/// bound.
+/// string glyph name, and a string font name on every `show`, is copied each time it is used: up
+/// to the longest name, each copy is charged, so a loop runs out of budget; one byte longer, the
+/// first use stops at the name length limit.
 #[test]
 fn eps_glyphshow_and_string_font_names_are_bounded() {
     let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
@@ -710,17 +708,60 @@ fn eps_glyphshow_and_string_font_names_are_bounded() {
     it.run(b"100000 { s glyphshow } repeat");
     assert_eq!(before - it.allocation_budget, 0, "glyphshow with no font copies nothing");
 
-    let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
-    it.run(b"/F findfont 10 scalefont setfont 0 0 moveto /s 10000000 string def");
-    it.run(b"{ { s glyphshow } loop } loop");
-    let (_, _, skipped) = it.b.finish();
-    assert_eq!(skipped, ["PostScript (allocation limit)"], "a huge string glyph name is bounded");
+    for (what, setup, body) in [
+        ("a string glyph name", "/F findfont 10 scalefont setfont 0 0 moveto", "s glyphshow"),
+        ("a string font name", "<< /FontName s /FontType 1 >> setfont 0 0 moveto", "(A) show"),
+    ] {
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        // The first use builds the font; the loop's copies then have room for ten.
+        it.run(format!("/s {MAX_NAME} string def {setup} {body}").as_bytes());
+        it.allocation_budget = 10 * MAX_NAME;
+        it.run(format!("{{ {{ {body} }} loop }} loop").as_bytes());
+        let (_, _, skipped) = it.b.finish();
+        assert_eq!(skipped, ["PostScript (allocation limit)"], "{what}: each copy is charged");
 
-    let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
-    it.run(b"/s 10000000 string def << /FontName s /FontType 1 >> setfont 0 0 moveto");
-    it.run(b"{ { (A) show } loop } loop");
-    let (_, _, skipped) = it.b.finish();
-    assert_eq!(skipped, ["PostScript (allocation limit)"], "a huge string font name is bounded");
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        it.run(format!("/s {} string def {setup}", MAX_NAME + 1).as_bytes());
+        it.allocation_budget = 10 * MAX_NAME;
+        it.run(format!("{body} {{ {{ {body} }} loop }} loop").as_bytes());
+        let (_, _, skipped) = it.b.finish();
+        assert_eq!(skipped, ["PostScript (name length limit)"], "{what}: one byte too long, at its first use");
+    }
+}
+
+/// Names and dictionary keys are at most `MAX_NAME` bytes however they are made: read from the
+/// file (a literal, an executable name, `//name`, inside a procedure or an executable string),
+/// converted by `cvn`, made by `load`, `findfont` or `definefont` from a string, or a string
+/// dictionary key. At the limit the program goes on; one byte longer stops it with a note, keeping
+/// what it drew before.
+#[test]
+fn eps_names_stop_at_the_name_length_limit() {
+    // The documented limit, written out rather than read from the code, so changing it fails here.
+    let limit = 255;
+    for len in [limit, limit + 1] {
+        let n = "x".repeat(len);
+        for (what, make) in [
+            ("a literal name", format!("/{n} pop")),
+            ("an executable name", n.clone()),
+            ("an immediate name", format!("//{n}")),
+            ("a name in a procedure", format!("{{ {n} }} pop")),
+            ("a name in an executable string", format!("({n}) cvx pop")),
+            ("cvn", format!("({n}) cvn pop")),
+            ("load of an undefined string", format!("({n}) load pop")),
+            ("findfont of a string", format!("({n}) findfont pop")),
+            ("definefont of a string", format!("({n}) 1 dict definefont pop")),
+            ("a string dictionary key", format!("1 dict ({n}) 0 put")),
+        ] {
+            let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+            it.run(format!("0 0 10 10 rectfill {make} 20 20 10 10 rectfill").as_bytes());
+            let (nodes, _, skipped) = it.b.finish();
+            if len == limit {
+                assert!(nodes.len() == 2 && skipped.is_empty(), "{what} at the limit: {skipped:?}");
+            } else {
+                assert!(nodes.len() == 1 && skipped == ["PostScript (name length limit)"], "{what} past the limit: {skipped:?}");
+            }
+        }
+    }
 }
 
 /// An unknown operator is noted for the report by the start of its name only, however long the
@@ -728,7 +769,7 @@ fn eps_glyphshow_and_string_font_names_are_bounded() {
 #[test]
 fn eps_unknown_operators_keep_a_short_name() {
     let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
-    it.run(format!("({}) cvn cvx exec", "x".repeat(10_000)).as_bytes());
+    it.run(format!("({}) cvn cvx exec", "x".repeat(MAX_NAME)).as_bytes());
     assert!(!it.unknown.is_empty() && it.unknown.iter().all(|u| u.chars().count() <= 64), "{:?}", it.unknown.iter().map(String::len).collect::<Vec<_>>());
 }
 
