@@ -1159,6 +1159,38 @@ fn fit_to_comp_fills_the_comp_with_shape_and_text_bounds() {
     assert!(close(seen[3] - seen[1], 640.0 * 80.0 / 180.0), "the 180×80 rect keeps its aspect ratio: {seen:?}");
 }
 
+/// A shape layer of rectangles `(size, centre)` in layer space, painted with the default fill
+/// (`fillOpacity` %).
+fn rects_layer(s: &mut Session, rects: &[([f64; 2], [f64; 2], f64)]) -> u64 {
+    let l = s.execute("layer.newShape", json!({})).unwrap()["layer"].as_u64().unwrap();
+    for (size, at, opacity) in rects {
+        let p = json!({"layer": l, "kind": "rect", "size": size, "position": at, "space": "layer", "fillOpacity": opacity});
+        s.execute("shape.newShape", p).unwrap();
+    }
+    l
+}
+
+#[test]
+fn fit_to_comp_sizes_a_shape_by_the_paint_it_shows() {
+    let mut s = comp();
+    let close = |x: f64, y: f64| (x - y).abs() < 1e-6;
+    // A 180×80 rectangle on show, and one far from it whose fill is at zero opacity: the renderer
+    // draws nothing for that one, so it must not shrink the shown one inside the frame.
+    let a = rects_layer(&mut s, &[([180.0, 80.0], [0.0, 0.0], 100.0), ([40.0, 40.0], [280.0, 160.0], 0.0)]);
+    s.execute("layer.transform", json!({"layers": [a], "op": "fit"})).unwrap();
+    let tr = layer(&s, a).transform().unwrap().clone();
+    let scale = tr.get("scale").unwrap().value.as_vec3();
+    assert!(close(scale[0], 640.0 / 180.0 * 100.0) && close(scale[1], 360.0 / 80.0 * 100.0), "the shown rectangle fills the comp: {scale:?}");
+    let anchor = tr.get("anchor").unwrap().value.as_vec3();
+    assert!(close(anchor[0], 0.0) && close(anchor[1], 0.0), "anchored at the shown rectangle's centre: {anchor:?}");
+    // A shape painted only at zero opacity (a fill fading in, at its first frame) is still sized
+    // by its geometry.
+    let b = rects_layer(&mut s, &[([200.0, 120.0], [0.0, 0.0], 0.0)]);
+    s.execute("layer.transform", json!({"layers": [b], "op": "fit"})).unwrap();
+    let scale = layer(&s, b).transform().unwrap().get("scale").unwrap().value.as_vec3();
+    assert!(close(scale[0], 320.0) && close(scale[1], 300.0), "the transparent rectangle fills the comp: {scale:?}");
+}
+
 #[test]
 fn duplicated_and_pasted_layers_keep_their_links() {
     let mut s = comp();
