@@ -824,11 +824,16 @@ fn each_drop_down_pick_and_checkbox_click_is_its_own_undo_step() {
     let lid = s.execute("layer.newSolid", json!({"color": "#000000", "name": "Base"})).unwrap()["layer"].as_u64().unwrap();
     let fx = s.execute("effect.apply", json!({"effect": "Gaussian Blur"})).unwrap()["effects"][0].as_u64().unwrap();
     let lc = s.execute("effect.apply", json!({"effect": "Layer Control"})).unwrap()["effects"][0].as_u64().unwrap();
+    let fill = s.execute("effect.apply", json!({"effect": "Fill"})).unwrap()["effects"][0].as_u64().unwrap();
+    for _ in 0..2 {
+        s.execute("mask.new", json!({"layer": lid, "vertices": [[0, 0], [80, 0], [80, 80]], "closed": true})).unwrap();
+    }
     let other = s.execute("layer.newSolid", json!({"color": "#ffffff", "name": "Other"})).unwrap()["layer"].as_u64().unwrap();
     let l = layer(&s, lid);
     let g = l.effects().unwrap().groups().find(|g| g.uid == fx).unwrap();
     let (dims, repeat, effects) = (g.get("dimensions").unwrap().uid, g.get("repeatEdge").unwrap().uid, l.effects().unwrap().uid);
     let lay = l.effects().unwrap().groups().find(|g| g.uid == lc).and_then(|g| g.get("layer")).unwrap().uid;
+    let mask = l.effects().unwrap().groups().find(|g| g.uid == fill).and_then(|g| g.get("fillMask")).unwrap().uid;
     s.state.selected_layers = vec![LayerId(lid)];
     let mut app = EffectcraftApp::new(s);
     app.show_panel(PanelKind::EffectControls);
@@ -845,36 +850,36 @@ fn each_drop_down_pick_and_checkbox_click_is_its_own_undo_step() {
         h.run_steps(3);
     };
 
-    let n = undo_len(&h);
-    let ec = format!("effectControls.prop.{dims}.value");
-    choose(&mut h, &ec, "Vertical");
-    choose(&mut h, &ec, "Horizontal");
-    assert_eq!(value(&h, dims), KV::Enum(1));
-    assert_eq!(undo_len(&h), n + 2, "two picks, two steps");
-    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
-    assert_eq!(value(&h, dims), KV::Enum(2), "undo goes back to the first pick");
-    h.run_steps(2);
-
-    let n = undo_len(&h);
-    for _ in 0..2 {
-        let at = rect_of(&h, &format!("effectControls.prop.{repeat}.value")).center();
-        click(&mut h, at);
+    // Each drop-down: Blur Dimensions in both panels, and Fill's mask popup (this layer's masks),
+    // which only Effect Controls draws.
+    for (id, uid, [first, second], [after_first, after_second]) in [
+        (format!("effectControls.prop.{dims}.value"), dims, ["Vertical", "Horizontal"], [KV::Enum(2), KV::Enum(1)]),
+        (format!("timeline.prop.{dims}.value"), dims, ["Horizontal", "Horizontal and Vertical"], [KV::Enum(1), KV::Enum(0)]),
+        (format!("effectControls.prop.{mask}.value"), mask, ["Mask 1", "Mask 2"], [KV::Scalar(1.0), KV::Scalar(2.0)]),
+    ] {
+        let n = undo_len(&h);
+        choose(&mut h, &id, first);
+        choose(&mut h, &id, second);
+        assert_eq!(value(&h, uid), after_second, "{id}");
+        assert_eq!(undo_len(&h), n + 2, "two picks, two steps ({id})");
+        h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(value(&h, uid), after_first, "undo goes back to the first pick ({id})");
+        h.run_steps(2);
     }
-    assert_eq!(value(&h, repeat), KV::Bool(false));
-    assert_eq!(undo_len(&h), n + 2, "two clicks, two steps");
-    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
-    assert_eq!(value(&h, repeat), KV::Bool(true));
-    h.run_steps(2);
 
-    let n = undo_len(&h);
-    let tl = format!("timeline.prop.{dims}.value");
-    choose(&mut h, &tl, "Horizontal");
-    choose(&mut h, &tl, "Horizontal and Vertical");
-    assert_eq!(value(&h, dims), KV::Enum(0));
-    assert_eq!(undo_len(&h), n + 2, "two Timeline picks, two steps");
-    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
-    assert_eq!(value(&h, dims), KV::Enum(1));
-    h.run_steps(2);
+    // The checkbox, in both panels.
+    for id in [format!("effectControls.prop.{repeat}.value"), format!("timeline.prop.{repeat}.value")] {
+        let (n, before) = (undo_len(&h), value(&h, repeat));
+        for _ in 0..2 {
+            let at = rect_of(&h, &id).center();
+            click(&mut h, at);
+        }
+        assert_eq!(value(&h, repeat), before, "{id}");
+        assert_eq!(undo_len(&h), n + 2, "two clicks, two steps ({id})");
+        h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+        assert_ne!(value(&h, repeat), before, "undo goes back to the first click ({id})");
+        h.run_steps(2);
+    }
 
     // The shared layer drop-down (a Layer Control's layer, an Environment light's Source), in both
     // panels: "1. Other" is the top layer, "2. Base" this one.
