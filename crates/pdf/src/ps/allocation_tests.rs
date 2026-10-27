@@ -465,25 +465,28 @@ fn held_text(v: &V) -> usize {
     }
 }
 
-/// `load` of an undefined name keeps the name in the operator it makes, and `cvs` and `cvn`
-/// keep the text they convert to, so each charges that text's full length first: an operator, a
-/// name or a string, made or converted over and over and kept in an array, never holds more than
-/// the budget.
+/// `load` of an undefined name keeps the name in the operator it makes, `cvs` and `cvn` keep the
+/// text they convert to, and `forall` over a dictionary hands out a fresh copy of each key, so
+/// each charges that text's full length first: an operator, a name, a string or a key, made,
+/// converted or handed out over and over and kept in an array, never holds more than the budget.
 #[test]
 fn eps_conversions_charge_the_text_they_keep() {
     let long = "a".repeat(10_000);
     let budget = 100_000;
     let mut over = vec![];
-    for (what, body) in [
-        ("load of an undefined name", format!("/{long} load")),
-        ("load of an undefined string", format!("({long}) load")),
-        ("cvs of a loaded operator", format!("/{long} load 0 string cvs")),
-        ("cvs of a name", format!("/{long} 0 string cvs")),
-        ("cvs of a string", format!("({long}) 0 string cvs")),
-        ("cvn of a loaded operator", format!("/{long} load cvn")),
-        ("cvn of a string", format!("({long}) cvn")),
+    let dict = format!("/d 1 dict def d /{long} 0 put");
+    for (what, setup, body) in [
+        ("load of an undefined name", "", format!("/{long} load")),
+        ("load of an undefined string", "", format!("({long}) load")),
+        ("cvs of a loaded operator", "", format!("/{long} load 0 string cvs")),
+        ("cvs of a name", "", format!("/{long} 0 string cvs")),
+        ("cvs of a string", "", format!("({long}) 0 string cvs")),
+        ("cvn of a loaded operator", "", format!("/{long} load cvn")),
+        ("cvn of a string", "", format!("({long}) cvn")),
+        ("forall over a dictionary's key", dict.as_str(), "d { pop } forall".to_string()),
     ] {
         let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        it.run(setup.as_bytes());
         it.allocation_budget = budget;
         it.run(format!("[ 50 {{ {body} }} repeat ] 0 0 10 10 rectfill").as_bytes());
         let held: usize = it.st.iter().map(held_text).sum();

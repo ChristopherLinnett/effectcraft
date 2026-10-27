@@ -130,12 +130,13 @@ ffmpeg elsewhere) to check the code tables against an independent implementation
   Runtime array/procedure payloads and string bytes have a cumulative 256 MiB allocation
   budget (array slots are charged at `size_of::<V>()`); dropping or overwriting an object does
   not refund it. Constructors, intervals, conversions and bulk operand/snapshot copies share
-  this budget. `load` of an undefined name charges the name its operator keeps, and a
-  conversion (`cvs`, `cvn`) charges the whole text it produces, whatever it converts (a string,
-  a name or such an operator). Executable strings and lossy UTF-8 comparison copies are charged
-  conservatively before tokenization or conversion. Constructor limits remain 1,000,000 array
-  slots and 10,000,000 string bytes. Exhaustion stops execution with an allocation-limit note
-  rather than continuing with partial results.
+  this budget. `load` of an undefined name charges the name its operator keeps, `forall` over a
+  dictionary charges each copy of a key it hands out, and a conversion (`cvs`, `cvn`) charges
+  the whole text it produces, whatever it converts (a string, a name or such an operator).
+  Executable strings and lossy UTF-8 comparison copies are charged conservatively before
+  tokenization or conversion. Constructor limits remain 1,000,000 array slots and 10,000,000
+  string bytes. Exhaustion stops execution with an allocation-limit note rather than continuing
+  with partial results.
   This is not a process-memory guarantee: source tokens, dictionaries/names, font internals,
   graphics/output, container capacity and allocator overhead are outside this payload budget.
 - **Create Shapes from Vector Layer:** clips that enclose the whole page become layer masks

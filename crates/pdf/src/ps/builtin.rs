@@ -250,7 +250,10 @@ impl Interp {
                         let items: Vec<(String, V)> = d.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                         for (k, v) in items {
                             self.spend(1)?;
-                            self.push(V::Lit(k.into()));
+                            // Each run hands the procedure a fresh copy of the key, which it can keep.
+                            let key = V::Lit(k.into());
+                            self.allocate(key.key_bytes())?;
+                            self.push(key);
                             self.push(v);
                             match self.exec_obj(p.clone(), src) {
                                 Err(Flow::Exit) => break,
