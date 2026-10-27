@@ -604,6 +604,46 @@ fn alt_wheel_over_a_long_expression_only_zooms_the_timeline() {
     assert!((after.min.y - laid_out.min.y).abs() < 1.0, "the text stays put: {after:?} from {laid_out:?}");
 }
 
+/// The caret stays in sight: a new line typed past the field's rows scrolls into view, empty as it
+/// is, in a field dragged to one row and in a field grown to its eight; an emptied field keeps
+/// its one row in view.
+#[test]
+fn a_new_line_typed_past_the_fields_rows_scrolls_into_view() {
+    let ten: Vec<String> = (1..=10).map(|i| format!("v{i} = {i};")).collect();
+    // The rows the field is dragged to (or its own), and the lines typed over its expression.
+    let cases: [(Option<usize>, Vec<&str>); 5] = [
+        (Some(1), vec!["value", ""]),
+        (Some(1), vec!["value", "", "", ""]),
+        (Some(1), vec!["", ""]),
+        (Some(1), vec![""]),
+        (None, ten.iter().map(String::as_str).chain([""]).collect()),
+    ];
+    for (rows, lines) in cases {
+        let (mut h, _) = harness();
+        let (_, opacity) = with_expression(&mut h, "opacity", "value");
+        if let Some(n) = rows {
+            h.state_mut().ui.timeline.expr_lines.insert(opacity, n);
+            h.run_steps(3);
+        }
+        let id = format!("timeline.prop.{opacity}.expression");
+        let at = center(&h, &id);
+        click(&mut h, at, 1);
+        key_with(&mut h, Key::A, Modifiers::COMMAND);
+        key(&mut h, Key::Backspace);
+        for (i, line) in lines.iter().enumerate() {
+            if i > 0 {
+                key(&mut h, Key::Enter);
+            }
+            if !line.is_empty() {
+                type_text(&mut h, line);
+            }
+        }
+        h.run_steps(3);
+        let numbers = line_numbers_shown(&h, rect_of(&h, &id));
+        assert!(numbers.iter().any(|(n, _)| *n as usize == lines.len()), "{lines:?}: the caret's line {} shows: {numbers:?}", lines.len());
+    }
+}
+
 /// With Word Wrap, a line that only just fits the field's width stays on one line and doesn't
 /// scroll: the wheel over it scrolls the Timeline. The field measures its text wrapped at the
 /// width it draws it at.

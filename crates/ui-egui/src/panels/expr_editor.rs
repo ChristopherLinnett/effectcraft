@@ -358,6 +358,8 @@ pub fn editor(
     // measure below both lay it out at this one width (not the one egui offers), so they agree on
     // where its lines break.
     let wrap = if p.word_wrap { er.width() } else { f32::INFINITY };
+    // How far below the top of its row a glyph's ink ends, for a row that has none yet.
+    let glyph_bottom = ui.fonts_mut(|f| f.layout_no_wrap("0".to_owned(), font.clone(), color)).mesh_bounds.max.y;
     let mut layouter = move |ui: &egui::Ui, text: &dyn egui::TextBuffer, _: f32| {
         let job = layout(text.as_str(), font.clone(), color, &sx, &pc, brackets, wrap);
         ui.fonts_mut(|f| f.layout_job(job))
@@ -378,11 +380,22 @@ pub fn editor(
     // rows. Up and down, the text is taller when its glyphs end past its rows, measured as the
     // editor draws them: from the top of the field (the editor has no frame, so nothing pads the
     // text). A line's box reaches a little past its glyphs, so measuring boxes would make a line
-    // that fits its row scroll by a few pixels and take the wheel from the Timeline. The scroll
-    // bars float over the text, so a one-line field keeps its line, and show a thin handle while
-    // there is more to see. The editor fills the field, so a click anywhere in it edits.
+    // that fits its row scroll by a few pixels and take the wheel from the Timeline. A last row
+    // with no glyphs (after a final newline, or only spaces) still holds the caret, so it ends
+    // where a glyph on it would; otherwise the caret could sit below the rows with nothing to
+    // scroll it into view. The scroll bars float over the text, so a one-line field keeps its
+    // line, and show a thin handle while there is more to see. The editor fills the field, so a
+    // click anywhere in it edits.
     let rows = Rect::from_center_size(rect.center(), vec2(rect.width(), room));
-    let tall = rect.min.y + layouter(&child, &*buf, wrap).mesh_bounds.max.y > rows.max.y + 0.5;
+    let galley = layouter(&child, &*buf, wrap);
+    let empty_last_row = galley.rows.last().filter(|r| !r.visuals.mesh_bounds.is_positive());
+    let text_end = empty_last_row.map_or(galley.mesh_bounds.max.y, |r| galley.mesh_bounds.max.y.max(r.rect().min.y + glyph_bottom));
+    let tall = rect.min.y + text_end > rows.max.y + 0.5;
+    // The text is measured before the editor takes this frame's typing, so an edit that makes it
+    // taller turns scrolling on only from the next frame, after egui's own scroll to the caret
+    // (on that edit) found nothing to scroll: the editor scrolls to the caret again then.
+    let follow_caret_id = id.with("follow-caret");
+    let follow_caret = ui.ctx().data_mut(|d| d.remove_temp::<bool>(follow_caret_id)).unwrap_or(false);
     child.set_clip_rect(child.clip_rect().intersect(rows));
     child.spacing_mut().scroll = egui::style::ScrollStyle { dormant_handle_opacity: 0.6, ..egui::style::ScrollStyle::floating() };
     let scroll = egui::ScrollArea::new([!p.word_wrap, tall])
@@ -391,7 +404,7 @@ pub fn editor(
         .min_scrolled_width(0.0)
         .min_scrolled_height(0.0)
         .show(&mut child, |ui| {
-            egui::TextEdit::multiline(buf)
+            let out = egui::TextEdit::multiline(buf)
                 .id(id)
                 .font(Tokens::mono(size))
                 .desired_width(ui.available_width())
@@ -400,11 +413,19 @@ pub fn editor(
                 .frame(egui::Frame::NONE)
                 .lock_focus(true)
                 .layouter(&mut layouter)
-                .show(ui)
+                .show(ui);
+            if follow_caret && let Some(c) = out.cursor_range {
+                ui.scroll_to_rect(out.galley.pos_from_cursor(c.primary).translate(out.galley_pos.to_vec2()), None);
+            }
+            out
         });
     // Sideways only without Word Wrap: with it the field doesn't scroll that way.
     let overflows = [!p.word_wrap && scroll.content_size.x > scroll.inner_rect.width() + 0.5, tall];
     let out = scroll.inner;
+    if out.response.changed() {
+        ui.ctx().data_mut(|d| d.insert_temp(follow_caret_id, true));
+        ui.ctx().request_repaint();
+    }
     if let Some(c) = accepted {
         let mut st = out.state.clone();
         st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(c))));
