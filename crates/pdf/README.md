@@ -132,13 +132,16 @@ ffmpeg elsewhere) to check the code tables against an independent implementation
   not refund it. Constructors, intervals, conversions and bulk operand/snapshot copies share
   this budget. `load` of an undefined name charges the name its operator keeps, `forall` over a
   dictionary charges each copy of a key it hands out, and a conversion (`cvs`, `cvn`) charges
-  the whole text it produces, whatever it converts (a string, a name or such an operator).
-  Executable strings and lossy UTF-8 comparison copies are charged conservatively before
-  tokenization or conversion. Constructor limits remain 1,000,000 array slots and 10,000,000
-  string bytes. Exhaustion stops execution with an allocation-limit note rather than continuing
-  with partial results.
-  This is not a process-memory guarantee: source tokens, dictionaries/names, font internals,
-  graphics/output, container capacity and allocator overhead are outside this payload budget.
+  the whole text it produces, whatever it converts (a string, a name or such an operator). A
+  dictionary charges each key once, when it is added (`def`, `store`, `put`, `>>`, the copy
+  `scalefont` and `makefont` make, a new font name for `findfont` or `definefont`); putting a
+  new value under an existing key is free. Executable strings and lossy UTF-8 comparison copies
+  are charged conservatively before tokenization or conversion. Constructor limits remain
+  1,000,000 array slots and 10,000,000 string bytes. Exhaustion stops execution with an
+  allocation-limit note rather than continuing with partial results.
+  This is not a process-memory guarantee: source tokens (names included), dictionary objects
+  and their capacity, font internals, graphics/output, container capacity and allocator overhead
+  are outside this payload budget.
 - **Create Shapes from Vector Layer:** clips that enclose the whole page become layer masks
   (the first clip Add, later ones Intersect). Nested clipping groups become Merge Paths: each
   closed shape inside them is a group with its geometry merged into one compound path, the clip

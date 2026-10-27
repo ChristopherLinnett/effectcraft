@@ -112,6 +112,21 @@ impl Interp {
         Ok(v.key())
     }
 
+    /// Charge a key a dictionary is adding (`new`): it keeps its own copy, so a new key counts
+    /// against the budget once, like any kept text; replacing an existing key's value keeps the
+    /// copy it has and costs nothing.
+    pub(super) fn charge_key(&mut self, new: bool, k: &str) -> Result<(), Flow> {
+        if new { self.allocate(k.len()) } else { Ok(()) }
+    }
+
+    /// Put `v` under `k` in `d`, charging the key if it is new ([`Self::charge_key`]).
+    pub(super) fn dict_insert(&mut self, d: &DictRef, k: String, v: V) -> Result<(), Flow> {
+        let new = !d.borrow().contains_key(&k);
+        self.charge_key(new, &k)?;
+        d.borrow_mut().insert(k, v);
+        Ok(())
+    }
+
     /// Precharge a string's worst-case lossy UTF-8 copy before producing the existing equality key.
     /// A name's key is copied only for the comparison, and names are outside the payload budget.
     pub(super) fn comparison_key(&mut self, v: &V) -> Result<String, Flow> {

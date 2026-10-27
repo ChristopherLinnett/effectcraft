@@ -72,7 +72,8 @@ fn eps_getinterval_preserves_order_and_shallow_identity() {
         let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
         it.run(setup.as_bytes());
         let source = it.lookup("a").unwrap().items().unwrap();
-        it.allocation_budget = 4 * std::mem::size_of::<V>();
+        // The interval's four slots, and the new key `slice` the dictionary keeps.
+        it.allocation_budget = 4 * std::mem::size_of::<V>() + "slice".len();
         it.run(b"/a load 1 4 getinterval /slice exch def /a load 1 get 0 77 put /a load 2 get 0 122 put slice");
         let V::Array(part) = it.st.last().unwrap() else { panic!("intervals must still return arrays") };
         let part = part.borrow();
@@ -368,12 +369,14 @@ fn eps_stack_boundaries_preserve_order_and_compound_identity() {
     assert!(skipped.is_empty(), "{skipped:?}");
 }
 
-/// Array slots and string bytes must consume one counter without refunds on overwrite or drop.
+/// Array slots, string bytes and dictionary keys must consume one counter without refunds on
+/// overwrite or drop; overwriting a key's value costs nothing more.
 #[test]
 fn eps_mixed_payloads_exhaust_one_budget_without_refunds() {
     let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
     let slots = 2 * std::mem::size_of::<V>();
-    it.allocation_budget = slots + 3;
+    // Two slots, three string bytes, and the key `a` once: its second `def` overwrites.
+    it.allocation_budget = slots + 3 + "a".len();
     it.run(b"/a 2 array def 3 string pop /a null def");
     assert_eq!(it.allocation_budget, 0);
     it.run(b"0 string pop 1 string");
@@ -454,27 +457,35 @@ fn eps_interpreters_start_with_a_256_mib_allocation_budget() {
     }
 }
 
-/// Text bytes a value holds: its string or name, and those of the arrays inside it.
+/// Text bytes a value holds: its string or name, and those of the arrays and dictionaries
+/// (keys included) inside it.
 fn held_text(v: &V) -> usize {
     match v {
         V::Str(s) => s.borrow().len(),
         V::Name(n) | V::Lit(n) | V::Op(n) => n.len(),
         V::Array(a) => a.borrow().iter().map(held_text).sum(),
         V::Proc(p) => p.iter().map(held_text).sum(),
+        V::Dict(d) => d.borrow().iter().map(|(k, v)| k.len() + held_text(v)).sum(),
         _ => 0,
     }
 }
 
 /// `load` of an undefined name keeps the name in the operator it makes, `cvs` and `cvn` keep the
-/// text they convert to, and `forall` over a dictionary hands out a fresh copy of each key, so
-/// each charges that text's full length first: an operator, a name, a string or a key, made,
-/// converted or handed out over and over and kept in an array, never holds more than the budget.
+/// text they convert to, `forall` over a dictionary hands out a fresh copy of each key, and a
+/// dictionary keeps its own copy of every key added to it (by `def`, `store`, `put`, `>>`, a
+/// font's `scalefont` copy, or `findfont` and `definefont` naming a new font), so each charges
+/// that text's full length first: made, converted, handed out or added over and over and kept in
+/// an array, it never holds more than the budget.
 #[test]
 fn eps_conversions_charge_the_text_they_keep() {
     let long = "a".repeat(10_000);
     let budget = 100_000;
     let mut over = vec![];
     let dict = format!("/d 1 dict def d /{long} 0 put");
+    let string = "/s 10000 string def /i 0 def";
+    // A new font name each time, from one string: its first byte counts up.
+    let next = "s 0 i put /i i 1 add def";
+    let font = "/s 10000 string def /f 1 dict def f s 0 put";
     for (what, setup, body) in [
         ("load of an undefined name", "", format!("/{long} load")),
         ("load of an undefined string", "", format!("({long}) load")),
@@ -484,6 +495,14 @@ fn eps_conversions_charge_the_text_they_keep() {
         ("cvn of a loaded operator", "", format!("/{long} load cvn")),
         ("cvn of a string", "", format!("({long}) cvn")),
         ("forall over a dictionary's key", dict.as_str(), "d { pop } forall".to_string()),
+        ("put of a string key into new dictionaries", string, "1 dict dup s 0 put".to_string()),
+        ("def of a string key into new dictionaries", string, "1 dict begin s 0 def currentdict end".to_string()),
+        ("def of a name key into new dictionaries", "", format!("1 dict begin /{long} 0 def currentdict end")),
+        ("store of a string key into new dictionaries", string, "1 dict begin s 0 store currentdict end".to_string()),
+        ("<< >> with a string key", string, "<< s 0 >>".to_string()),
+        ("scalefont copies of a font with a long key", font, "f 10 scalefont".to_string()),
+        ("findfont of new font names", string, format!("{next} s findfont")),
+        ("definefont of new font names", string, format!("{next} s 1 dict definefont")),
     ] {
         let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
         it.run(setup.as_bytes());
@@ -496,4 +515,16 @@ fn eps_conversions_charge_the_text_they_keep() {
         }
     }
     assert!(over.is_empty(), "conversions past a {budget}-byte budget: {over:#?}");
+}
+
+/// A dictionary charges a key once, when it is added: defining, storing or putting a new value
+/// under it again costs nothing more.
+#[test]
+fn eps_dictionary_keys_are_charged_once() {
+    let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+    it.allocation_budget = "key".len();
+    it.run(b"/key 0 def 100 { /key 1 def /key 2 store currentdict /key 3 put } repeat 0 0 10 10 rectfill");
+    assert_eq!(it.allocation_budget, 0, "the key, charged once");
+    let (nodes, _, skipped) = it.b.finish();
+    assert!(skipped.is_empty() && nodes.len() == 1, "overwrites are free: {skipped:?}");
 }

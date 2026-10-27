@@ -83,7 +83,7 @@ impl Interp {
                 self.st.pop();
                 let d = new_dict();
                 for kv in items.as_chunks::<2>().0 {
-                    d.borrow_mut().insert(kv[0].key(), kv[1].clone());
+                    self.dict_insert(&d, kv[0].key(), kv[1].clone())?;
                 }
                 self.push(V::Dict(d));
             }
@@ -302,8 +302,8 @@ impl Interp {
             "def" => {
                 let v = self.pop();
                 let k = self.pop().key();
-                if let Some(d) = self.dicts.last() {
-                    d.borrow_mut().insert(k, v);
+                if let Some(d) = self.dicts.last().cloned() {
+                    self.dict_insert(&d, k, v)?;
                 }
             }
             "store" => {
@@ -311,7 +311,7 @@ impl Interp {
                 let k = self.pop().key();
                 let d = self.dicts.iter().rev().find(|d| d.borrow().contains_key(&k)).or(self.dicts.last()).cloned();
                 if let Some(d) = d {
-                    d.borrow_mut().insert(k, v);
+                    self.dict_insert(&d, k, v)?;
                 }
             }
             "load" => {
@@ -381,7 +381,7 @@ impl Interp {
                 let key = self.pop().key();
                 match (n, category.as_str()) {
                     ("findfont", _) | (_, "Font") => {
-                        let f = self.find_font(&key);
+                        let f = self.find_font(&key)?;
                         self.push(V::Dict(f));
                     }
                     ("findencoding", _) | (_, "Encoding") => self.push_encoding(&key)?,
@@ -393,6 +393,7 @@ impl Interp {
                 let v = self.pop();
                 let key = self.pop().key();
                 if let (V::Dict(d), "Font") = (&v, category.as_str()) {
+                    self.charge_key(!self.font_dir.contains_key(&key), &key)?;
                     self.font_dir.insert(key, d.clone());
                 }
                 self.push(v);
@@ -437,9 +438,7 @@ impl Interp {
                 let v = self.pop();
                 let k = self.pop();
                 match self.pop() {
-                    V::Dict(d) => {
-                        d.borrow_mut().insert(k.key(), v);
-                    }
+                    V::Dict(d) => self.dict_insert(&d, k.key(), v)?,
                     V::Array(a) => {
                         let i = k.num().unwrap_or(0.0) as usize;
                         if let Some(slot) = a.borrow_mut().get_mut(i) {
