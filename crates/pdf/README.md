@@ -132,26 +132,30 @@ ffmpeg elsewhere) to check the code tables against an independent implementation
   procedure slots at `size_of::<V>()`, string bytes, and kept text at its exact length (a
   number, a boolean or a string that isn't UTF-8 is converted for the moment first, to measure
   it). That covers constructors, intervals, conversions (`cvs`, `cvn`), bulk operand and
-  snapshot copies (`aload`, `copy`, `getinterval`, and `forall`, which charges the copies of a
-  dictionary's keys before taking them), matrices (six slots each, a font's included), encoding
-  arrays (256 slots), the dash array `gsave` or `save` copies, executable strings (charged
-  conservatively before tokenization) and lossy UTF-8 comparison copies. A dictionary charges a
-  key once, when it is new (`def`, `store`, `put`, `>>`, `defineresource`, `definefont`, a new
-  font for `findfont` or `selectfont`, the copy `scalefont`, `makefont` and `selectfont` make);
-  replacing an existing key's value copies and costs nothing. `load` of an undefined name
-  charges the name its operator keeps. A font built for drawing (by its base name and the first
-  256 glyph names of its encoding, or the one glyph `glyphshow` draws) charges the font, its
-  glyph-name table and its cache key, once; drawing with it again charges only the string shown.
-  Constructor limits remain 1,000,000 array slots and 10,000,000 string bytes, and at most
+  snapshot copies (`aload`, `copy`, `getinterval`, and `forall`, which over a dictionary charges
+  both the copies of its keys and the key-value pairs of its snapshot), matrices (six slots each,
+  a font's included), encoding arrays (256 slots), the dash array `gsave` or `save` copies,
+  executable strings (charged conservatively before tokenization) and lossy UTF-8 comparison
+  copies. A dictionary charges a new entry once — its key text and a fixed slot for the key's
+  `String` and the value (`def`, `store`, `put`, `>>`, `defineresource`, `definefont`, a new font
+  for `findfont` or `selectfont`, and the per-key copies `scalefont`, `makefont` and `selectfont`
+  make); replacing an existing key's value reuses the entry and costs nothing. Hashing or
+  comparing a string used as a dictionary key, a lookup name (`get`, `known`, `load`, `where`,
+  `undef`), a font name (`findfont`, `selectfont`), or an `eq` operand reads every byte, so each
+  such operation charges the string's worst-case scan; a name is read in place and costs nothing.
+  `load` of an undefined name charges the name its operator keeps. A font built for drawing (by
+  its base name and the first 256 glyph names of its encoding, or the one glyph `glyphshow` draws)
+  charges the font, its glyph-name table and its cache key, once; drawing with it again charges
+  only the string shown, and a string font or glyph name is copied, and charged, each time it is
+  used. Constructor limits remain 1,000,000 array slots and 10,000,000 string bytes, and at most
   1,024 graphics-state copies (`gsave`, `save`) are kept at once. Reaching a limit stops
   execution with a note (allocation limit, graphics state depth limit) rather than continuing
   with partial results.
   This is not a process-memory guarantee. Outside the budget: source tokens (the file's names
   and strings) and the embedded font programs read from it; the operand stack (at most 100,000
-  values); lookup keys, read in place or converted only for the moment; a dictionary's storage
-  beyond its keys, including the entry list `forall` takes of one; paths, including those in
-  graphics-state copies, which the operation and path limits bound; drawn output; font program
-  internals; container capacity and allocator overhead.
+  values); name lookup keys, read in place; paths, including those in graphics-state copies,
+  which the operation and path limits bound; drawn output; font program internals; a hash table's
+  spare buckets and a vector's spare capacity, and allocator overhead.
 - **Create Shapes from Vector Layer:** clips that enclose the whole page become layer masks
   (the first clip Add, later ones Intersect). Nested clipping groups become Merge Paths: each
   closed shape inside them is a group with its geometry merged into one compound path, the clip

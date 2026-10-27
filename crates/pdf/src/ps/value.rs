@@ -51,13 +51,6 @@ impl V {
     pub(super) fn key(&self) -> String {
         self.with_key(str::to_owned)
     }
-    /// The name this value stands for: a name's own text, shared, else a copy of its key text.
-    pub(super) fn shared_name(&self) -> Rc<str> {
-        match self {
-            V::Name(n) | V::Lit(n) | V::Op(n) => n.clone(),
-            other => other.key().into(),
-        }
-    }
     /// The most bytes [`V::key`] allocates: a string's worst-case lossy UTF-8 copy (each invalid
     /// byte becomes at most three), a name's length, at most 512 for a number (f64's
     /// non-exponential decimal form stays under it), 5 for a boolean and none for an empty key.

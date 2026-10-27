@@ -41,10 +41,10 @@ fn dict_matrix(d: &DictRef, key: &str) -> Affine {
 
 impl Interp {
     /// A copy of a font dictionary with `m` applied after its matrix (`scalefont`, `makefont`).
-    /// The copy keeps its own copy of every key and a new matrix, all charged first.
+    /// The copy keeps an entry of its own for every key, and a new matrix, all charged first.
     fn transformed(&mut self, font: &DictRef, m: Affine) -> Result<DictRef, Flow> {
         for k in font.borrow().keys() {
-            self.charge_key(k)?;
+            self.charge_entry(k)?;
         }
         let copy: HashMap<String, V> = font.borrow().clone();
         let d = Rc::new(RefCell::new(copy));
@@ -57,11 +57,15 @@ impl Interp {
     /// The font dictionary the key `k` names: one `definefont` made, else a new dictionary for an
     /// embedded program or a bundled stand-in, which Font Directory keeps.
     pub(super) fn find_font(&mut self, k: &V) -> Result<DictRef, Flow> {
+        // Looking the name up in Font Directory hashes it; charge a big string name's scan so a
+        // loop of `findfont`/`selectfont` on one cannot do work that scales with its length each
+        // time. A new font additionally keeps the name, charged below.
+        self.charge_scan(k)?;
         if let Some(V::Dict(d)) = k.with_key(|t| self.font_dir.borrow().get(t).cloned()) {
             return Ok(d);
         }
         // The new font keeps its name, once, as FontName and as the program to draw it with.
-        let name: Rc<str> = self.converted_key(k)?.into();
+        let name: Rc<str> = self.converted_key(k)?;
         let d = new_dict();
         let entries = [
             ("FontName", V::Lit(name.clone())),
@@ -91,7 +95,8 @@ impl Interp {
         }
         let key: FontKey = {
             let m = d.borrow();
-            let Some(base) = m.get("__base").or_else(|| m.get("FontName")).map(V::shared_name) else { return Ok(None) };
+            let Some(base) = m.get("__base").or_else(|| m.get("FontName")) else { return Ok(None) };
+            let base = self.name_of(base)?;
             let glyphs = match (glyph, m.get("Encoding")) {
                 (Some(g), _) => Glyphs::One(g),
                 (None, Some(V::Array(a))) => Glyphs::Encoding(a.borrow().iter().take(256).map(encoded_name).collect()),
@@ -213,7 +218,7 @@ impl Interp {
                         // A font the file defines itself: its embedded program, by name, which
                         // the font keeps as its own copy.
                         let name = self.converted_key(&key)?;
-                        self.dict_insert(d, &V::Lit("__base".into()), V::Lit(name.into()))?;
+                        self.dict_insert(d, &V::Lit("__base".into()), V::Lit(name))?;
                         let matrix = self.matrix(Affine::IDENTITY)?;
                         self.dict_insert(d, &V::Lit("__m".into()), matrix)?;
                     }
@@ -223,6 +228,7 @@ impl Interp {
             }
             "undefinefont" => {
                 let key = self.pop();
+                self.charge_scan(&key)?;
                 key.with_key(|t| self.font_dir.borrow_mut().remove(t));
             }
             "StandardEncoding" | "ISOLatin1Encoding" => self.push_encoding(n)?,
@@ -265,9 +271,10 @@ impl Interp {
                 self.explicit_show(&s, &disp, n)?;
             }
             "glyphshow" => {
-                let glyph = self.pop().shared_name();
+                let v = self.pop();
                 if self.gs.font.is_some() {
                     // Drawn as code 65 of a font that names only that glyph, cached like any other.
+                    let glyph = self.name_of(&v)?;
                     self.show_with(Some(glyph), b"A", |_, _| (0.0, 0.0))?;
                 }
             }

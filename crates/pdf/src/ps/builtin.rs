@@ -249,10 +249,13 @@ impl Interp {
                     V::Dict(d) => {
                         // The entries are snapshotted before the procedure runs (it may change the
                         // dictionary), each key as a literal name of its own the procedure can
-                        // keep: charge the key copies before taking it.
+                        // keep: charge the key copies and the snapshot's two slots an entry before
+                        // taking it.
                         for k in d.borrow().keys() {
                             self.charge_key(k)?;
                         }
+                        let entries = d.borrow().len();
+                        self.allocate_items(entries.saturating_mul(2))?;
                         let items: Vec<(V, V)> = d.borrow().iter().map(|(k, v)| (V::Lit(k.as_str().into()), v.clone())).collect();
                         for (key, v) in items {
                             self.spend(1)?;
@@ -312,22 +315,25 @@ impl Interp {
             "store" => {
                 let v = self.pop();
                 let k = self.pop();
+                self.charge_scan(&k)?;
                 if let Some(d) = self.defining_dict(&k).or_else(|| self.dicts.last().cloned()) {
                     self.dict_insert(&d, &k, v)?;
                 }
             }
             "load" => {
                 let k = self.pop();
+                self.charge_scan(&k)?;
                 let v = match k.with_key(|t| self.lookup(t)) {
                     Some(v) => v,
                     // The operator keeps the whole name, however long the file made it.
-                    None => V::Op(self.converted_key(&k)?.into()),
+                    None => V::Op(self.converted_key(&k)?),
                 };
                 self.push(v);
             }
             "undef" => {
                 let k = self.pop();
                 if let V::Dict(d) = self.pop() {
+                    self.charge_scan(&k)?;
                     k.with_key(|t| d.borrow_mut().remove(t));
                 }
             }
@@ -357,6 +363,7 @@ impl Interp {
             }
             "where" => {
                 let k = self.pop();
+                self.charge_scan(&k)?;
                 match self.defining_dict(&k) {
                     Some(d) => {
                         self.push(V::Dict(d));
@@ -368,7 +375,10 @@ impl Interp {
             "known" => {
                 let k = self.pop();
                 let v = match self.pop() {
-                    V::Dict(d) => k.with_key(|t| d.borrow().contains_key(t)),
+                    V::Dict(d) => {
+                        self.charge_scan(&k)?;
+                        k.with_key(|t| d.borrow().contains_key(t))
+                    }
                     _ => false,
                 };
                 self.push(V::Bool(v));
@@ -378,10 +388,12 @@ impl Interp {
             "findresource" | "findfont" | "findencoding" => {
                 let category = if n == "findresource" { self.pop() } else { V::Null };
                 let key = self.pop();
+                self.charge_scan(&category)?;
                 if n == "findfont" || category.with_key(|t| t == "Font") {
                     let f = self.find_font(&key)?;
                     self.push(V::Dict(f));
                 } else if n == "findencoding" || category.with_key(|t| t == "Encoding") {
+                    self.charge_scan(&key)?;
                     key.with_key(|t| self.push_encoding(t))?;
                 } else {
                     self.push(V::Dict(new_dict()));
@@ -391,6 +403,7 @@ impl Interp {
                 let category = self.pop();
                 let v = self.pop();
                 let key = self.pop();
+                self.charge_scan(&category)?;
                 if matches!(v, V::Dict(_)) && category.with_key(|t| t == "Font") {
                     self.define_font(&key, v.clone())?;
                 }
@@ -424,7 +437,10 @@ impl Interp {
             "get" => {
                 let k = self.pop();
                 let v = match self.pop() {
-                    V::Dict(d) => k.with_key(|t| d.borrow().get(t).cloned()).unwrap_or(V::Null),
+                    V::Dict(d) => {
+                        self.charge_scan(&k)?;
+                        k.with_key(|t| d.borrow().get(t).cloned()).unwrap_or(V::Null)
+                    }
                     V::Str(s) => V::Num(s.borrow().get(k.num().unwrap_or(0.0) as usize).copied().unwrap_or(0) as f64),
                     V::Array(a) => a.borrow().get(k.num().unwrap_or(0.0) as usize).cloned().unwrap_or(V::Null),
                     V::Proc(p) => p.get(k.num().unwrap_or(0.0) as usize).cloned().unwrap_or(V::Null),
@@ -535,12 +551,12 @@ impl Interp {
             "cvn" => {
                 let v = self.pop();
                 let k = self.converted_key(&v)?;
-                self.push(V::Lit(k.into()));
+                self.push(V::Lit(k));
             }
             "cvs" => {
                 self.pop();
                 let v = self.pop();
-                let k = self.converted_key(&v)?;
+                let k: String = self.converted_key(&v)?;
                 self.push(V::Str(Rc::new(RefCell::new(k.into_bytes()))));
             }
             "xcheck" => {

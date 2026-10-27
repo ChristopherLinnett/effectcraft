@@ -17,6 +17,11 @@ pub(super) const MAX_STACK: usize = 100_000;
 /// Runtime compound payloads, excluding source tokens, graphics, fonts and container overhead.
 const MAX_ALLOCATION: usize = 256 * 1024 * 1024;
 
+/// What a dictionary keeps for an entry besides its key's text: the key's `String` and the value's
+/// slot. The table's spare buckets and control bytes are container overhead, outside the budget
+/// like a vector's spare capacity.
+pub(super) const DICT_ENTRY: usize = std::mem::size_of::<(String, V)>();
+
 impl Interp {
     /// Create an interpreter with independent operation and cumulative runtime-payload budgets.
     pub fn new(page: [f64; 4]) -> Interp {
@@ -112,29 +117,60 @@ impl Interp {
     /// A copy of the key text `v` names (what a conversion such as `cvs` or `cvn` keeps), its
     /// exact length charged before the copy is made. The text is read in place for a name or a
     /// UTF-8 string; a number, a boolean or a string that isn't UTF-8 is converted first.
-    pub(super) fn converted_key(&mut self, v: &V) -> Result<String, Flow> {
+    pub(super) fn converted_key<T: for<'a> From<&'a str>>(&mut self, v: &V) -> Result<T, Flow> {
         v.with_key(|t| {
             self.allocate(t.len())?;
-            Ok(t.to_owned())
+            Ok(T::from(t))
         })
     }
 
-    /// Charge a copy of the dictionary key `k` before it is made: the copies a font copy or
-    /// `forall` takes of every key.
+    /// The name `v` stands for: a name's own text, shared at no cost, else a copy of its key text
+    /// ([`Self::converted_key`]).
+    pub(super) fn name_of(&mut self, v: &V) -> Result<Rc<str>, Flow> {
+        match v {
+            V::Name(n) | V::Lit(n) | V::Op(n) => Ok(n.clone()),
+            other => self.converted_key(other),
+        }
+    }
+
+    /// Charge a copy of the dictionary key `k` before it is made: the copy `forall` hands out of
+    /// every key.
     pub(super) fn charge_key(&mut self, k: &str) -> Result<(), Flow> {
         self.allocate(k.len())
     }
 
-    /// Put `v` in `d` under the key `k` names. A key `d` already has keeps its copy and only its
-    /// value is replaced, at no cost; a new key is a copy the dictionary keeps, its exact length
-    /// charged before it is made.
+    /// Charge a new dictionary entry under the key `k` before it is made: the key's text and the
+    /// entry's slot ([`DICT_ENTRY`]).
+    pub(super) fn charge_entry(&mut self, k: &str) -> Result<(), Flow> {
+        self.allocate(k.len().saturating_add(DICT_ENTRY))
+    }
+
+    /// Charge a string operand's worst-case scan before it is hashed or compared as a dictionary
+    /// key, in `eq`, or on a lookup. Hashing or comparing reads every byte, so a huge string key
+    /// would otherwise do work that scales with its length for a single operation (a lookup or an
+    /// overwrite in a loop). A name is read in place and shared, so it costs nothing.
+    pub(super) fn charge_scan(&mut self, v: &V) -> Result<(), Flow> {
+        if let V::Str(_) = v {
+            self.allocate(v.key_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// Put `v` in `d` under the key `k` names. A key `d` already has keeps its entry, and only its
+    /// value is replaced: the hash reads the whole key, so a big string key's scan is charged
+    /// ([`Self::charge_scan`]). A new key is an entry the dictionary keeps, which reads the key
+    /// once as it is stored and is charged in full ([`Self::charge_entry`]).
     pub(super) fn dict_insert(&mut self, d: &DictRef, k: &V, v: V) -> Result<(), Flow> {
+        let scan = if let V::Str(_) = k { k.key_bytes() } else { 0 };
         k.with_key(|t| {
-            if let Some(slot) = d.borrow_mut().get_mut(t) {
-                *slot = v;
+            if d.borrow().contains_key(t) {
+                self.allocate(scan)?;
+                if let Some(slot) = d.borrow_mut().get_mut(t) {
+                    *slot = v;
+                }
                 return Ok(());
             }
-            self.allocate(t.len())?;
+            self.charge_entry(t)?;
             d.borrow_mut().insert(t.to_owned(), v);
             Ok(())
         })
@@ -164,12 +200,11 @@ impl Interp {
         self.allocate(dash.saturating_mul(std::mem::size_of::<f64>()))
     }
 
-    /// Precharge a string's worst-case lossy UTF-8 copy before producing the existing equality key.
-    /// A name's key is copied only for the comparison, and names are outside the payload budget.
+    /// Precharge a string's worst-case lossy UTF-8 copy ([`Self::charge_scan`]) before producing
+    /// the existing equality key. A name's key is copied only for the comparison, and names are
+    /// outside the payload budget.
     pub(super) fn comparison_key(&mut self, v: &V) -> Result<String, Flow> {
-        if let V::Str(_) = v {
-            self.allocate(v.key_bytes())?;
-        }
+        self.charge_scan(v)?;
         Ok(v.key())
     }
 

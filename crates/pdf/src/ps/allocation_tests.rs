@@ -72,8 +72,8 @@ fn eps_getinterval_preserves_order_and_shallow_identity() {
         let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
         it.run(setup.as_bytes());
         let source = it.lookup("a").unwrap().items().unwrap();
-        // The interval's four slots, and the new key `slice` the dictionary keeps.
-        it.allocation_budget = 4 * std::mem::size_of::<V>() + "slice".len();
+        // The interval's four slots, and the new entry `slice` the dictionary keeps.
+        it.allocation_budget = 4 * std::mem::size_of::<V>() + "slice".len() + std::mem::size_of::<(String, V)>();
         it.run(b"/a load 1 4 getinterval /slice exch def /a load 1 get 0 77 put /a load 2 get 0 122 put slice");
         let V::Array(part) = it.st.last().unwrap() else { panic!("intervals must still return arrays") };
         let part = part.borrow();
@@ -375,8 +375,8 @@ fn eps_stack_boundaries_preserve_order_and_compound_identity() {
 fn eps_mixed_payloads_exhaust_one_budget_without_refunds() {
     let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
     let slots = 2 * std::mem::size_of::<V>();
-    // Two slots, three string bytes, and the key `a` once: its second `def` overwrites.
-    it.allocation_budget = slots + 3 + "a".len();
+    // Two slots, three string bytes, and the entry `a` once: its second `def` overwrites.
+    it.allocation_budget = slots + 3 + "a".len() + std::mem::size_of::<(String, V)>();
     it.run(b"/a 2 array def 3 string pop /a null def");
     assert_eq!(it.allocation_budget, 0);
     it.run(b"0 string pop 1 string");
@@ -517,26 +517,28 @@ fn eps_conversions_charge_the_text_they_keep() {
     assert!(over.is_empty(), "conversions past a {budget}-byte budget: {over:#?}");
 }
 
-/// A dictionary charges a key once, when it is added: defining, storing or putting a new value
-/// under it again costs nothing more.
+/// A dictionary charges an entry once, when it is added: defining, storing or putting a new value
+/// under the same key again costs nothing more.
 #[test]
 fn eps_dictionary_keys_are_charged_once() {
     let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
-    it.allocation_budget = "key".len();
+    it.allocation_budget = "key".len() + std::mem::size_of::<(String, V)>();
     it.run(b"/key 0 def 100 { /key 1 def /key 2 store currentdict /key 3 put } repeat 0 0 10 10 rectfill");
-    assert_eq!(it.allocation_budget, 0, "the key, charged once");
+    assert_eq!(it.allocation_budget, 0, "the entry, charged once");
     let (nodes, _, skipped) = it.b.finish();
     assert!(skipped.is_empty() && nodes.len() == 1, "overwrites are free: {skipped:?}");
 }
 
-/// `forall` over a dictionary snapshots its entries before running the procedure, each key as a
-/// literal name of its own: the whole snapshot is charged before it is taken, however early the
-/// procedure exits. Five 10 000-byte keys need exactly 50 000 bytes.
+/// `forall` over a dictionary snapshots its entries before running the procedure, each as a key-
+/// value pair whose key is a literal name of its own: the whole snapshot is charged before it is
+/// taken, however early the procedure exits. Five 10 000-byte keys need their 50 000 bytes and the
+/// snapshot's five pairs of slots.
 #[test]
 fn eps_forall_charges_the_dictionary_snapshot_first() {
     let a = "a".repeat(9_999);
     let setup = format!("/d 5 dict def d /{a}0 0 put d /{a}1 0 put d /{a}2 0 put d /{a}3 0 put d /{a}4 0 put");
-    for (budget, fits) in [(50_000, true), (49_999, false)] {
+    let slots = 5 * 2 * std::mem::size_of::<V>();
+    for (budget, fits) in [(50_000 + slots, true), (50_000 + slots - 1, false)] {
         let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
         it.run(setup.as_bytes());
         it.allocation_budget = budget;
@@ -551,12 +553,15 @@ fn eps_forall_charges_the_dictionary_snapshot_first() {
     }
 }
 
-/// A new font keeps its name, its keys and two six-slot matrices (FontMatrix and its own); a
-/// `scalefont` copy keeps its keys and a matrix of its own; a font `definefont` completes keeps the
-/// program's name, two keys and a matrix: all charged, matrices by their slots.
+/// A new font keeps its name, six entries and two six-slot matrices (FontMatrix and its own), plus
+/// a Font Directory entry; a `scalefont` copy keeps an entry for every key and a matrix of its own;
+/// a font `definefont` completes keeps the program's name, two entries, a matrix and a Font
+/// Directory entry: all charged, entries by their key text and a fixed slot, matrices by their
+/// slots.
 #[test]
 fn eps_fonts_charge_their_keys_and_matrices() {
     let slot = std::mem::size_of::<V>();
+    let entry = std::mem::size_of::<(String, V)>();
     let keys: usize = ["FontName", "FontType", "FontMatrix", "FID", "__base", "__m"].iter().map(|k| k.len()).sum();
     let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
     let spent = |it: &mut Interp, ps: &[u8]| {
@@ -564,11 +569,12 @@ fn eps_fonts_charge_their_keys_and_matrices() {
         it.run(ps);
         before - it.allocation_budget
     };
-    // The name, once for the font and once as its Font Directory key.
-    assert_eq!(spent(&mut it, b"/F findfont pop"), 1 + keys + 12 * slot + 1, "findfont of a new font");
+    // The name, once for the font and once as its Font Directory key; the six dictionary entries
+    // and the Font Directory entry.
+    assert_eq!(spent(&mut it, b"/F findfont pop"), 2 + keys + 12 * slot + 7 * entry, "findfont of a new font");
     assert_eq!(spent(&mut it, b"/F findfont pop"), 0, "findfont of a known font");
-    assert_eq!(spent(&mut it, b"/F findfont 10 scalefont pop"), keys + 6 * slot, "scalefont");
-    assert_eq!(spent(&mut it, b"/G 1 dict definefont pop"), 1 + "__base".len() + "__m".len() + 6 * slot + 1, "definefont");
+    assert_eq!(spent(&mut it, b"/F findfont 10 scalefont pop"), keys + 6 * entry + 6 * slot, "scalefont");
+    assert_eq!(spent(&mut it, b"/G 1 dict definefont pop"), 2 + "__base".len() + "__m".len() + 6 * slot + 3 * entry, "definefont");
 }
 
 /// `glyphshow` draws through a cached font that names just that glyph: the first use of a glyph
@@ -655,6 +661,68 @@ fn eps_text_charges_a_new_fonts_encoding_names_once() {
     }
 }
 
+/// Hashing or comparing a string used as a dictionary key, a lookup name, or a font name reads
+/// every byte, so each such operation charges the string's worst-case scan: a loop over one big
+/// string key does bounded work. A name, shared in place, costs nothing.
+#[test]
+fn eps_string_key_scans_are_charged() {
+    let scan = 1000 * 3; // The worst-case lossy UTF-8 length a 1 000-byte string could scan to.
+    for (what, setup, op) in [
+        ("known", "/d 1 dict def /s 1000 string def d s 0 put", "d s known pop"),
+        ("get", "/d 1 dict def /s 1000 string def d s 0 put", "d s get pop"),
+        ("put overwrite", "/d 1 dict def /s 1000 string def d s 0 put", "d s 1 put"),
+        ("where", "/s 1000 string def s 0 def", "s where pop"),
+        ("load", "/s 1000 string def s 0 def", "s load pop"),
+        ("findfont hit", "/s 1000 string def s findfont pop", "s findfont pop"),
+    ] {
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        it.run(setup.as_bytes());
+        let before = it.allocation_budget;
+        it.run(op.as_bytes());
+        assert_eq!(before - it.allocation_budget, scan, "{what} charges the key scan");
+    }
+    // The same operations on a name key read it in place and keep nothing, so they cost nothing.
+    for (what, setup, op) in [
+        ("known", "/d 1 dict def /k 0 def", "d /k known pop"),
+        ("get", "/d 1 dict def d /k 0 put", "d /k get pop"),
+        ("put overwrite", "/d 1 dict def d /k 0 put", "d /k 1 put"),
+        ("where", "/k 0 def", "/k where pop"),
+        ("load", "/k 0 def", "/k load pop"),
+        ("findfont hit", "/k findfont pop", "/k findfont pop"),
+    ] {
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        it.run(setup.as_bytes());
+        let before = it.allocation_budget;
+        it.run(op.as_bytes());
+        assert_eq!(before - it.allocation_budget, 0, "{what} on a name copies nothing");
+    }
+}
+
+/// `glyphshow` with no current font drops its operand and copies nothing. With a font set, a
+/// string glyph name is copied for the cache key each call, and a string font name is copied on
+/// every show, so a loop over a huge one stops at the allocation limit rather than copying without
+/// bound.
+#[test]
+fn eps_glyphshow_and_string_font_names_are_bounded() {
+    let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+    it.run(b"/s 1000 string def");
+    let before = it.allocation_budget;
+    it.run(b"100000 { s glyphshow } repeat");
+    assert_eq!(before - it.allocation_budget, 0, "glyphshow with no font copies nothing");
+
+    let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+    it.run(b"/F findfont 10 scalefont setfont 0 0 moveto /s 10000000 string def");
+    it.run(b"{ { s glyphshow } loop } loop");
+    let (_, _, skipped) = it.b.finish();
+    assert_eq!(skipped, ["PostScript (allocation limit)"], "a huge string glyph name is bounded");
+
+    let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+    it.run(b"/s 10000000 string def << /FontName s /FontType 1 >> setfont 0 0 moveto");
+    it.run(b"{ { (A) show } loop } loop");
+    let (_, _, skipped) = it.b.finish();
+    assert_eq!(skipped, ["PostScript (allocation limit)"], "a huge string font name is bounded");
+}
+
 /// An unknown operator is noted for the report by the start of its name only, however long the
 /// name the file made.
 #[test]
@@ -664,16 +732,18 @@ fn eps_unknown_operators_keep_a_short_name() {
     assert!(!it.unknown.is_empty() && it.unknown.iter().all(|u| u.chars().count() <= 64), "{:?}", it.unknown.iter().map(String::len).collect::<Vec<_>>());
 }
 
-/// A dictionary or a conversion charges the exact length of the key text it copies: a number's
-/// formatted length, a UTF-8 string's own length, a string that isn't UTF-8 by its replacement.
+/// A conversion charges the exact length of the key text it copies, and a new dictionary entry
+/// that length and a fixed entry slot: a number's formatted length, a UTF-8 string's own length, a
+/// string that isn't UTF-8 by its replacement. Overwriting an existing key keeps nothing new.
 #[test]
 fn eps_keys_and_conversions_charge_exact_lengths() {
+    let entry = std::mem::size_of::<(String, V)>();
     let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
     it.run(b"/d 3 dict def");
     for (ps, bytes) in [
-        ("d 12345 0 put", 5),
-        ("d (abc) 0 put", 3),
-        ("d <ff> 0 put", "\u{fffd}".len()),
+        ("d 12345 0 put", 5 + entry),
+        ("d (abc) 0 put", 3 + entry),
+        ("d <ff> 0 put", "\u{fffd}".len() + entry),
         ("d 12345 1 put", 0),
         ("(abc) cvn pop", 3),
         ("12345 0 string cvs pop", 5),

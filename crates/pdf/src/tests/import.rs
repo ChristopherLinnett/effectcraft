@@ -524,11 +524,16 @@ fn nested_loops_run_out_of_the_budget() {
         "{ 0 1 999999 {} for clear } loop",
         "/s 1000000 string def { s {} forall clear } loop",
         "/a 1000000 array def { a {} forall clear } loop",
-        "/d 1 dict def 0 1 99999 { d exch 0 put } for { d {} forall clear } loop",
         literals.as_str(),
     ] {
         runs_out_of_budget(body);
     }
+    // `forall` over a dictionary snapshots its entries into a key-value pair list before running
+    // the procedure. The snapshot's slots are charged, so a loop that keeps re-snapshotting a
+    // large dictionary stops at the allocation limit rather than growing until the operation limit.
+    let doc = eps_soon("0 0 10 10 rectfill /d 1 dict def 0 1 99999 { d exch 0 put } for { d {} forall clear } loop");
+    assert_eq!(doc.flatten().len(), 1);
+    assert_eq!(doc.skipped, ["PostScript (allocation limit)"]);
 }
 
 #[test]
