@@ -359,7 +359,7 @@ if (numKeys == 0) {
   }
 }";
 
-/// A layer named Plate with `expression` on `prop` (under eight more layers), twirled open: the
+/// A layer named Plate with `expression` on `prop` (above eight more layers), twirled open: the
 /// layer and the property's uid.
 fn with_expression(h: &mut Harness<'_, EffectcraftApp>, prop: &str, expression: &str) -> (u64, u64) {
     let (layer, uid, transform) = {
