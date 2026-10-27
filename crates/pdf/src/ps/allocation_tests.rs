@@ -738,19 +738,16 @@ fn eps_glyphshow_and_string_font_names_are_bounded() {
 fn eps_names_stop_at_the_name_length_limit() {
     // The documented limit, written out rather than read from the code, so changing it fails here.
     let limit = 255;
+    // A name made or kept at runtime over the limit stops the program, keeping what it drew.
     for len in [limit, limit + 1] {
         let n = "x".repeat(len);
         for (what, make) in [
-            ("a literal name", format!("/{n} pop")),
-            ("an executable name", n.clone()),
-            ("an immediate name", format!("//{n}")),
-            ("a name in a procedure", format!("{{ {n} }} pop")),
-            ("a name in an executable string", format!("({n}) cvx pop")),
             ("cvn", format!("({n}) cvn pop")),
             ("load of an undefined string", format!("({n}) load pop")),
             ("findfont of a string", format!("({n}) findfont pop")),
             ("definefont of a string", format!("({n}) 1 dict definefont pop")),
             ("a string dictionary key", format!("1 dict ({n}) 0 put")),
+            ("a literal name used as a key", format!("1 dict /{n} 0 put")),
         ] {
             let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
             it.run(format!("0 0 10 10 rectfill {make} 20 20 10 10 rectfill").as_bytes());
@@ -762,6 +759,87 @@ fn eps_names_stop_at_the_name_length_limit() {
             }
         }
     }
+    // A name read from the file, however long, never stops the program: a literal is just pushed,
+    // and an executable name too long to be any defined name or operator is noted as unknown (it is
+    // not looked up, so it does no work that scales with its length). Image data that reaches the
+    // scanner (an indirect data source, an unknown image operator) depends on this.
+    let n = "x".repeat(limit + 1);
+    for (what, make) in [
+        ("a literal name", format!("/{n} pop")),
+        ("an executable name", n.clone()),
+        ("an immediate name", format!("//{n} pop")),
+        ("a name in a procedure", format!("{{ {n} }} exec")),
+        ("a name in an executable string", format!("({n}) cvx exec")),
+    ] {
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        it.run(format!("0 0 10 10 rectfill {make} 20 20 10 10 rectfill").as_bytes());
+        let (nodes, _, skipped) = it.b.finish();
+        assert!(nodes.len() == 2 && !skipped.iter().any(|s| s.contains("name length")), "{what} must not stop: {nodes:?} {skipped:?}");
+    }
+}
+
+/// An over-long executable name read from the file is not looked up (that would hash it against
+/// every dictionary on the stack), so running one in a loop is bounded, not unbounded work.
+#[test]
+fn eps_a_long_executable_name_runs_bounded() {
+    let n = "x".repeat(100_000);
+    let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+    // Run the long name in a nested loop: each pass must spend only a constant, so the operation
+    // budget — not the name's length — ends it, and the square drawn first is kept.
+    it.run(format!("0 0 10 10 rectfill /p {{ {n} }} def {{ {{ p }} loop }} loop 20 20 10 10 rectfill").as_bytes());
+    let (nodes, _, skipped) = it.b.finish();
+    assert_eq!(skipped, ["PostScript (operation limit)"], "{skipped:?}");
+    assert_eq!(nodes.len(), 1, "the square before the loop is kept");
+}
+
+/// A matrix operand is exactly six numbers: a longer array is not read as a matrix, so a huge one
+/// (`concat`, `setmatrix`, `makefont`, a font's stored matrix) does constant work, not work that
+/// scales with its length.
+#[test]
+fn eps_matrix_requires_exactly_six_numbers() {
+    // `transform` through a six-number matrix moves the point; a seven-number array is not a
+    // matrix, so `transform` uses the identity CTM and leaves the point unchanged.
+    let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+    it.run(b"[ 1 0 0 1 10 20 ] 3 4 3 -1 roll transform");
+    assert_eq!((it.popn(), it.popn()), (24.0, 13.0), "six numbers translate the point");
+    // Six numbers and a seventh non-numeric entry: a matrix is exactly six numbers, so this is not
+    // one, and `transform` uses the identity CTM — reading the six and ignoring the rest would scan
+    // the whole array for an operand a program controls the length of.
+    let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+    it.run(b"[ 1 0 0 1 10 20 /x ] 3 4 3 -1 roll transform");
+    assert_eq!((it.popn(), it.popn()), (4.0, 3.0), "six numbers plus an extra entry is not a matrix");
+}
+
+/// Each stroke keeps its own copy of the dash array in the output, so it is charged: a normal dash
+/// costs its few numbers, and a large one painted in a loop stops at the allocation limit.
+#[test]
+fn eps_stroke_charges_the_dash_it_keeps() {
+    let f8 = std::mem::size_of::<f64>();
+    let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+    it.run(b"/a 1000 array def 0 1 999 { a exch 1 put } for a 0 setdash 0 0 moveto 10 10 lineto");
+    let before = it.allocation_budget;
+    it.run(b"stroke");
+    assert_eq!(before - it.allocation_budget, 1000 * f8, "the stroke's dash copy");
+    it.allocation_budget = 3 * 1000 * f8 - 1;
+    it.run(b"{ 0 0 moveto 10 10 lineto stroke } loop 50 50 10 10 rectfill");
+    let (nodes, _, skipped) = it.b.finish();
+    assert!(skipped == ["PostScript (allocation limit)"] && nodes.len() == 3, "a big dash in a loop is bounded: {nodes:?} {skipped:?}");
+}
+
+/// A `SubFileDecode` end-of-data marker longer than a name can be is not searched for (the search
+/// costs its length at each file position); the data after the filter is then read normally, so a
+/// trailing square draws. A short marker is still found and its data skipped.
+#[test]
+fn eps_subfiledecode_ignores_a_long_end_of_data_marker() {
+    // A short marker that never appears skips to the end of file, so the square after is lost.
+    let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+    it.run(b"0 0 10 10 rectfill currentfile 0 (%%ZZ) /SubFileDecode filter pop 20 20 10 10 rectfill");
+    assert_eq!(it.b.shapes, 1, "a short marker skips the rest of the file");
+    // A marker longer than the limit is not searched for, so the square after the filter draws.
+    let long = "Z".repeat(256);
+    let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+    it.run(format!("0 0 10 10 rectfill currentfile 0 ({long}) /SubFileDecode filter pop 20 20 10 10 rectfill").as_bytes());
+    assert_eq!(it.b.shapes, 2, "an over-long marker is ignored and the program goes on");
 }
 
 /// An unknown operator is noted for the report by the start of its name only, however long the
@@ -794,4 +872,47 @@ fn eps_keys_and_conversions_charge_exact_lengths() {
         it.run(ps.as_bytes());
         assert_eq!(before - it.allocation_budget, bytes, "{ps}");
     }
+}
+
+/// Building a font parses and keeps a result sized by its embedded program, so the program's
+/// length is charged for the new font: a big embedded program cannot be parsed into a kept result
+/// for a few operations without paying for it.
+#[test]
+fn eps_a_big_embedded_font_is_charged_per_new_font() {
+    // A minimal embedded Type 1 program padded to about 4 MiB, then drawn once.
+    let mut blob = b"%!FontType1-1.0: Big 001\n/FontName /Big def\ncurrentfile eexec\n".to_vec();
+    let pad = 4usize << 20;
+    blob.extend(std::iter::repeat_n(b'a', pad));
+    blob.extend_from_slice(b"\ncleartomark\n");
+    blob.extend_from_slice(b"/Big findfont 12 scalefont setfont 0 0 moveto ( ) stringwidth pop pop");
+    let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+    let before = it.allocation_budget;
+    it.run(&blob);
+    let spent = before - it.allocation_budget;
+    // The whole run — building the font dictionary and the drawable font — is charged at least the
+    // embedded program's size; a bundled stand-in's entry alone is a few kilobytes.
+    assert!(spent >= pad, "a new font is charged its embedded program: {spent} < {pad}");
+}
+
+/// A string's glyph outlines count against the operation budget and the path limit as they are
+/// built, element by element, so one `show` of a long string in a dense font cannot build an
+/// unbounded path for a single operation: it stops at the path limit.
+#[test]
+fn eps_text_spends_and_limits_each_glyph_outline() {
+    let dense = "/Helvetica findfont 12 scalefont dup /Encoding [ 256 { /H } repeat ] put setfont";
+    for op in ["show", "false charpath"] {
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        it.run(format!("{dense} 0 0 10 10 rectfill /s 100000 string def 0 0 moveto s {op} 20 20 10 10 rectfill").as_bytes());
+        let (nodes, _, skipped) = it.b.finish();
+        assert_eq!(skipped, ["PostScript (path limit)"], "{op}: one show of 100000 dense glyphs: {skipped:?}");
+        assert_eq!(nodes.len(), 1, "{op}: the square before it is kept");
+    }
+    // A short show in the same font draws and spends per glyph without hitting the limit.
+    let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+    it.run(format!("{dense} 0 0 moveto (HHHH) show").as_bytes());
+    let before = it.budget;
+    it.run(b"0 0 moveto (HHHH) show");
+    assert!(it.budget < before.saturating_sub(4), "four glyphs spend more than four operations");
+    let (nodes, _, skipped) = it.b.finish();
+    assert!(skipped.is_empty() && nodes.len() == 2, "short shows draw: {skipped:?}");
 }

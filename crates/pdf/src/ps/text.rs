@@ -19,6 +19,19 @@ fn encoded_name(v: &V) -> Option<Rc<str>> {
     }
 }
 
+/// The pointer-identity key for a font built from `base`, drawn with the one `glyph` or the first
+/// 256 names of `encoding`. It mirrors the [`Glyphs`] the content key uses, so it tells two fonts
+/// apart exactly when their names differ by identity (a re-encoding makes fresh, charged names).
+fn fast_key(base: &Rc<str>, glyph: Option<&Rc<str>>, encoding: Option<&V>) -> FastKey {
+    let base = NamePtr(Some(base.clone()));
+    match (glyph, encoding) {
+        (Some(g), _) => (base, 2, NamePtr(Some(g.clone())), Box::from([])),
+        (None, Some(V::Array(a))) => (base, 1, NamePtr(None), a.borrow().iter().take(256).map(|v| NamePtr(encoded_name(v))).collect()),
+        (None, Some(V::Proc(p))) => (base, 1, NamePtr(None), p.iter().take(256).map(|v| NamePtr(encoded_name(v))).collect()),
+        _ => (base, 0, NamePtr(None), Box::from([])),
+    }
+}
+
 /// The bytes a new drawable font keeps for `key`: the font, its table of 256 glyph names (each
 /// its own copy; an unencoded code names `.notdef`), its base name and the key's list of names.
 fn font_entry_bytes((base, glyphs): &FontKey) -> usize {
@@ -84,41 +97,63 @@ impl Interp {
 
     /// The drawable font of a font dictionary (its base program and the glyph names of its
     /// encoding, or the one `glyph` instead) and the matrix from text space (font size 1) to user
-    /// space. The cache is looked up with the names the dictionary holds, shared rather than
-    /// copied, so text in a font already built costs nothing; a new one charges what it keeps
-    /// ([`font_entry_bytes`]) before it is built.
+    /// space. A cheap pointer-identity cache answers the common case (the same dictionary drawn
+    /// again) without hashing the glyph names; on a pointer miss the content-keyed cache dedups by
+    /// what the names actually are, and a new font charges what it keeps ([`font_entry_bytes`] and
+    /// its embedded program) before it is built.
     fn font_of(&mut self, d: &DictRef, glyph: Option<Rc<str>>) -> Result<Option<(Rc<Font>, Affine)>, Flow> {
         if matches!(d.borrow().get("FontType"), Some(V::Num(t)) if *t == 3.0) {
             // Type 3 fonts (glyph procedures) are not run.
             self.b.skip("EPS Type 3 font");
             return Ok(None);
         }
-        let key: FontKey = {
+        let font = {
             let m = d.borrow();
             let Some(base) = m.get("__base").or_else(|| m.get("FontName")) else { return Ok(None) };
+            // A string base is copied (and charged) each time, so a huge font name stays bounded.
             let base = self.name_of(base)?;
-            let glyphs = match (glyph, m.get("Encoding")) {
-                (Some(g), _) => Glyphs::One(g),
-                (None, Some(V::Array(a))) => Glyphs::Encoding(a.borrow().iter().take(256).map(encoded_name).collect()),
-                (None, Some(V::Proc(p))) => Glyphs::Encoding(p.iter().take(256).map(encoded_name).collect()),
-                _ => Glyphs::Builtin,
-            };
-            (base, glyphs)
-        };
-        let font = match self.font_cache.get(&key) {
-            Some(f) => f.clone(),
-            None => {
-                self.allocate(font_entry_bytes(&key))?;
-                let (base, glyphs) = &key;
-                let names = match glyphs {
-                    Glyphs::Encoding(v) => Some(v.iter().map(|x| x.as_deref().map(str::to_owned)).collect()),
-                    Glyphs::One(g) => Some((0..=65).map(|c| (c == 65).then(|| g.to_string())).collect()),
-                    Glyphs::Builtin => None,
+            let encoding = m.get("Encoding");
+            // The pointers that identify this font's glyph names. Re-encoding makes fresh name
+            // objects (charged), so their pointers change and the pointer cache misses.
+            let fast = fast_key(&base, glyph.as_ref(), encoding);
+            if let Some(f) = self.font_fast.get(&fast) {
+                f.clone()
+            } else {
+                let glyphs = match (glyph, encoding) {
+                    (Some(g), _) => Glyphs::One(g),
+                    (None, Some(V::Array(a))) => Glyphs::Encoding(a.borrow().iter().take(256).map(encoded_name).collect()),
+                    (None, Some(V::Proc(p))) => Glyphs::Encoding(p.iter().take(256).map(encoded_name).collect()),
+                    _ => Glyphs::Builtin,
                 };
-                // Not embedded: a bundled stand-in, as for PDF.
-                let prog = self.embedded.get(&**base).cloned();
-                let f = Rc::new(Font::standalone(base, prog.as_ref().map(|(d, cff)| (d.as_slice(), *cff)), names));
-                self.font_cache.insert(key, f.clone());
+                let key: FontKey = (base, glyphs);
+                let f = match self.font_cache.get(&key) {
+                    Some(f) => f.clone(),
+                    None => {
+                        self.allocate(font_entry_bytes(&key))?;
+                        let (base, glyphs) = &key;
+                        let names = match glyphs {
+                            Glyphs::Encoding(v) => Some(v.iter().map(|x| x.as_deref().map(str::to_owned)).collect()),
+                            Glyphs::One(g) => Some((0..=65).map(|c| (c == 65).then(|| g.to_string())).collect()),
+                            Glyphs::Builtin => None,
+                        };
+                        // Not embedded: a bundled stand-in, as for PDF. The program bytes are shared,
+                        // but building the font parses and keeps a result sized by them, so charge
+                        // the program's length to bound a loop of new encodings over a big program.
+                        let prog = self.embedded.get(&**base).cloned();
+                        if let Some((data, _)) = &prog {
+                            self.allocate(data.len())?;
+                        }
+                        let f = Rc::new(Font::standalone(base, prog.as_ref().map(|(d, cff)| (d.as_slice(), *cff)), names));
+                        self.font_cache.insert(key, f.clone());
+                        f
+                    }
+                };
+                // The pointer cache only accelerates; the content cache above is the source of
+                // truth, so clearing it when it grows large keeps its memory bounded.
+                if self.font_fast.len() >= 1024 {
+                    self.font_fast.clear();
+                }
+                self.font_fast.insert(fast, f.clone());
                 f
             }
         };
@@ -138,6 +173,12 @@ impl Interp {
         for (i, &code) in bytes.iter().enumerate() {
             let code = code as u32;
             if let Some(g) = font.glyph(code) {
+                // Each glyph's outline elements count against the operation budget and the path
+                // limit, as the elements any operator builds do, so a long string's glyphs are
+                // paid for and cannot grow the path without bound before it is used.
+                let n = g.elements().len();
+                self.spend(n)?;
+                self.path_fits(path.elements().len().saturating_add(n))?;
                 path.extend(ctm * Affine::translate(p.to_vec2()) * m * (*g).clone());
             }
             text.push_str(&font.unicode(code));
@@ -285,11 +326,10 @@ impl Interp {
                 let start = self.gs.start;
                 match self.text_path(None, &s, |_, _| (0.0, 0.0))? {
                     Some((glyphs, _)) => {
-                        // The outlines join the path: each element counts against the budget and
-                        // the path limit.
+                        // `text_path` already spent and path-limited each glyph's elements as it
+                        // built them; joining them to the current path only needs room for them.
                         self.gs.path = saved;
                         self.room(glyphs.elements().len().saturating_add(1))?;
-                        self.spend(glyphs.elements().len())?;
                         self.gs.path.extend(glyphs);
                         if let Some(c) = self.gs.cur {
                             self.gs.path.move_to(c);

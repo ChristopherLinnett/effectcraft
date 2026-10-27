@@ -1,28 +1,19 @@
-use super::exec::MAX_NAME;
 use super::value::V;
 use super::*;
 
-/// Source tokenizer (the data source for `currentfile`).
+/// Source tokenizer (the data source for `currentfile`). A name of any length is read: the file
+/// bounds how many there are, running one is bounded where it is executed, and keeping one (as a
+/// dictionary key, say) is charged and length-capped there.
 pub(super) struct Src<'a> {
     pub(super) d: &'a [u8],
     pub(crate) pos: usize,
-    /// The length of a name longer than [`MAX_NAME`], once one is read: tokenizing stops there.
-    pub(super) long_name: Option<usize>,
 }
 
 impl<'a> Src<'a> {
     pub(super) fn new(d: &'a [u8]) -> Src<'a> {
-        Src { d, pos: 0, long_name: None }
+        Src { d, pos: 0 }
     }
 
-    /// `text` as a name, or none when it is longer than [`MAX_NAME`] (noted in `long_name`).
-    fn name(&mut self, text: String) -> Option<Rc<str>> {
-        if text.len() > MAX_NAME {
-            self.long_name = Some(text.len());
-            return None;
-        }
-        Some(text.into())
-    }
     fn skip_ws(&mut self) {
         while self.pos < self.d.len() {
             let c = self.d[self.pos];
@@ -106,9 +97,8 @@ impl<'a> Src<'a> {
                     self.pos += 1;
                 }
                 let w = String::from_utf8_lossy(self.word()).into_owned();
-                let w = self.name(w)?;
                 // `//name` (immediately evaluated) is treated like a plain name.
-                if imm { V::Name(w) } else { V::Lit(w) }
+                if imm { V::Name(w.into()) } else { V::Lit(w.into()) }
             }
             b'(' => {
                 self.pos += 1;
@@ -211,7 +201,7 @@ impl<'a> Src<'a> {
                         let s = String::from_utf8_lossy(w).into_owned();
                         match s.split_once('#').and_then(|(r, v)| i64::from_str_radix(v, r.parse::<u32>().ok().filter(|r| (2..=36).contains(r))?).ok()) {
                             Some(n) => V::Num(n as f64),
-                            None => V::Name(self.name(s)?),
+                            None => V::Name(s.into()),
                         }
                     }
                 }
@@ -222,7 +212,10 @@ impl<'a> Src<'a> {
     /// Step over inline image data that follows an `image` operator reading `currentfile`.
     pub(super) fn skip_image_data(&mut self) {
         self.skip_ws();
-        if self.d[self.pos..].starts_with(b"<~") || self.d.get(self.pos).is_some_and(|c| (b'!'..=b'u').contains(c) && !c.is_ascii_hexdigit()) {
+        // ASCII85 data: `<~` or a base-85 digit (`!`..`u`, or `z` for four zero bytes) that is not
+        // a hex digit, read to its `~>` terminator.
+        let a85 = |c: &u8| (*c == b'z' || (b'!'..=b'u').contains(c)) && !c.is_ascii_hexdigit();
+        if self.d[self.pos..].starts_with(b"<~") || self.d.get(self.pos).is_some_and(a85) {
             match self.d[self.pos..].windows(2).position(|w| w == b"~>") {
                 Some(p) => self.pos += p + 2,
                 None => self.pos = self.d.len(),

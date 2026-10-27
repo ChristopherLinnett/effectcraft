@@ -147,22 +147,29 @@ ffmpeg elsewhere) to check the code tables against an independent implementation
   every byte, so looking one up (`get`, `known`, `load`, `where`, `undef`, `store`, `findfont`,
   `selectfont`), replacing its value, or comparing it with `eq` charges its scan: a string at its
   worst-case lossy UTF-8 length, a name at its own length. `load` of an undefined name charges the
-  name its operator keeps. A font built for drawing (by its base name and the first 256 glyph
-  names of its encoding, or the one glyph `glyphshow` draws) charges the font, its glyph-name
-  table and its cache key, once; drawing with it again charges only the string shown, and a
-  string font or glyph name is copied, and charged, each time it is used. Constructor limits
-  remain 1,000,000 array slots and 10,000,000 string bytes, and at most 1,024 graphics-state
-  copies (`gsave`, `save`) are kept at once.
-  Names and dictionary keys are at most 255 bytes, however they are made: read from the file or
-  an executable string, converted by `cvn`, made by `load`, `findfont`, `definefont` or
-  `glyphshow` from a string, or a string or number used as a new key. Executing a name looks it
-  up in every dictionary on the stack without a charge, so this bound is what keeps one operation
-  cheap however long a loop runs (8,000,000 operations against 64 dictionaries take about two
-  seconds). PostScript's own limit is 127 characters (PostScript Language Reference, 3rd ed.,
-  Appendix B), which conforming interpreters enforce with `limitcheck`; 255 is the longest token
-  a DSC-conforming line can hold, so image data this interpreter cannot step over, read as names,
-  stays within it. The seventeen reference files this was checked against create names of at most
-  85 bytes, and real generator output at most 28.
+  name its operator keeps. A matrix is read only when its array is exactly six numbers, so
+  `concat`, `setmatrix`, `makefont` and a font's stored matrix do not scan an array a program can
+  make any length. A `SubFileDecode` end-of-data marker longer than a name is not searched for
+  (the search costs its length at each file position); a real marker is short. A font built for
+  drawing (by its base name and the first 256 glyph names of its encoding, or the one glyph
+  `glyphshow` draws) charges the font, its glyph-name table, its cache key and its embedded program
+  once; the same dictionary drawn again is answered by the identity of its name objects, without
+  hashing them, and charges only the string shown; a string font or glyph name is copied, and
+  charged, each time it is used. A string's glyph outlines count against the operation budget and
+  the path limit element by element as they are built, so `show`, `charpath` and the other text
+  operators pay for the glyphs they draw. Each stroke keeps its own copy of the dash array, charged
+  as the stroke is painted. Constructor limits remain 1,000,000 array slots and 10,000,000 string
+  bytes, and at most 1,024 graphics-state copies (`gsave`, `save`) are kept at once.
+  A name or dictionary key made or kept at runtime is at most 255 bytes — converted by `cvn`, made
+  by `load`, `findfont`, `definefont` or `glyphshow` from a string, or a string or number used as a
+  new key — and one byte longer stops the program (`limitcheck` in a conforming interpreter;
+  PostScript's documented limit is 127, PostScript Language Reference, 3rd ed., Appendix B). A name
+  read from the file is not capped, since the file bounds how many there are; one too long to be
+  any defined name or operator is not looked up (that would hash it against every dictionary on the
+  stack), but noted as an unknown operator, so running it in a loop is a constant cost however long
+  the name. Inline image data an `image` cannot step over (an indirect data source, an unknown
+  image operator) reaches the scanner as names, so a cap there would reject it; the reference files
+  create names of at most 85 bytes, real generator output 28.
   Reaching a limit stops execution with a note (allocation limit, graphics state depth limit,
   name length limit) rather than continuing with partial results.
   This is not a process-memory guarantee. Outside the budget: source tokens (the file's names

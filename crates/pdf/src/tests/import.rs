@@ -622,3 +622,50 @@ fn postscript_idiv_and_mod_of_i64_min_by_minus_one_give_zero() {
         assert_eq!(shape_names(&doc).len(), 1, "{prog}");
     }
 }
+
+/// Inline image data must never be read as a name: a long line of hex or ASCII85, or raw binary,
+/// following an `image` — directly, through an indirect data-source procedure, an unknown image
+/// operator, or a bare `readhexstring` — leaves the trailing square drawn and raises no name-length
+/// note. (A regression where a 255-byte name cap stopped on image bytes.)
+#[test]
+fn image_data_is_not_read_as_a_name() {
+    let n = 300;
+    let pat: Vec<u8> = (0..n).map(|i| ((i * 37 + 11) & 0xff) as u8).collect();
+    let hex: String = pat.iter().map(|b| format!("{b:02X}")).collect();
+    let mat = "300 1 8 [1 0 0 1 0 0]";
+    let mut cases: Vec<(String, Vec<u8>)> = vec![];
+    let mut body = |label: &str, prolog: &str, trailer: Vec<u8>| {
+        let mut b = format!("/picstr {n} string def\n{prolog}\n").into_bytes();
+        b.extend_from_slice(&trailer);
+        b.extend_from_slice(b"\n0 0 10 10 rectfill\n");
+        cases.push((label.to_string(), b));
+    };
+    body("indirect proc hex, one line", "/rdhex { currentfile picstr readhexstring pop } bind def", format!("{mat} {{ rdhex }} image\n{hex}").into_bytes());
+    body("unknown image op, hex one line", "", format!("{mat} {{ currentfile picstr readhexstring pop }} myimageop\n{hex}").into_bytes());
+    body("bare readhexstring, hex one line", "", format!("currentfile picstr readhexstring pop pop\n{hex}").into_bytes());
+    let mut a85 = vec![b'z'; 300];
+    a85.extend_from_slice(b"~>");
+    body("ASCII85 'z' one line via filter", "", {
+        let mut t = format!("{mat} currentfile /ASCII85Decode filter image\n").into_bytes();
+        t.extend_from_slice(&a85);
+        t
+    });
+    body("binary solid 0xFF, no DSC wrapper", "", {
+        let mut t = format!("{mat} {{ currentfile picstr readstring pop }} image\n").into_bytes();
+        t.extend(std::iter::repeat_n(0xFFu8, n));
+        t
+    });
+    body("indirect proc, high-bit bytes short line", "/rdbin { currentfile picstr readstring pop } bind def", {
+        let mut t = format!("{mat} {{ rdbin }} image\n").into_bytes();
+        t.extend(std::iter::repeat_n(0xC8u8, 100));
+        t
+    });
+    for (label, bytes) in cases {
+        // The data is not always UTF-8, so assemble the EPS bytes and parse them directly.
+        let mut full = b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 200 100\n".to_vec();
+        full.extend_from_slice(&bytes);
+        let doc = parse(&full).unwrap();
+        assert_eq!(doc.flatten().len(), 1, "{label}: the trailing square must survive; skipped={:?}", doc.skipped);
+        assert!(!doc.skipped.iter().any(|s| s.contains("name length")), "{label}: image data must not hit the name length limit: {:?}", doc.skipped);
+    }
+}

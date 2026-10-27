@@ -1,4 +1,5 @@
 use super::eps::find_from;
+use super::exec::MAX_NAME;
 use super::scanner::Src;
 use super::value::{Flow, V, array, matrix_of, new_dict};
 use super::*;
@@ -533,7 +534,7 @@ impl Interp {
                     let bytes = s.borrow().clone();
                     let mut sub = Src::new(&bytes);
                     let mut body = vec![];
-                    while let Some(t) = self.next_token(&mut sub)? {
+                    while let Some(t) = sub.token(0) {
                         body.push(t);
                     }
                     self.push(V::Proc(Rc::new(body)));
@@ -684,7 +685,10 @@ impl Interp {
                     let eod = eod.borrow();
                     let count = self.popn();
                     let source = self.pop();
-                    if matches!(source, V::File) && count == 0.0 && !eod.is_empty() {
+                    // Searching for the end-of-data string costs its length at each file position,
+                    // so cap it: a real marker (`%%EndBinary` and the like) is short, and the
+                    // search then stays O(MAX_NAME) per byte as `pos` only moves forward.
+                    if matches!(source, V::File) && count == 0.0 && !eod.is_empty() && eod.len() <= MAX_NAME {
                         src.pos = match find_from(src.d, &eod, src.pos) {
                             Some(p) => p.saturating_add(eod.len()),
                             None => src.d.len(),
@@ -933,9 +937,9 @@ impl Interp {
                 self.gs.path = kurbo::Shape::to_path(&kurbo::Rect::new(p[0], p[1], p[2], p[3]), 0.1);
             }
             // Painting.
-            "fill" => self.paint(Some(FillRule::NonZero), false),
-            "eofill" => self.paint(Some(FillRule::EvenOdd), false),
-            "stroke" => self.paint(None, true),
+            "fill" => self.paint(Some(FillRule::NonZero), false)?,
+            "eofill" => self.paint(Some(FillRule::EvenOdd), false)?,
+            "stroke" => self.paint(None, true)?,
             "clip" | "eoclip" => {
                 let rule = if n == "clip" { FillRule::NonZero } else { FillRule::EvenOdd };
                 self.spend(self.gs.path.elements().len())?;
@@ -957,7 +961,7 @@ impl Interp {
                     "rectclip" => self.b.clip(all, FillRule::NonZero),
                     _ => {
                         let saved = std::mem::replace(&mut self.gs.path, all);
-                        self.paint(if n == "rectfill" { Some(FillRule::NonZero) } else { None }, n == "rectstroke");
+                        self.paint(if n == "rectfill" { Some(FillRule::NonZero) } else { None }, n == "rectstroke")?;
                         self.gs.path = saved;
                     }
                 }

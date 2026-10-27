@@ -9,6 +9,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 use effectcraft_svg::{Affine, BezPath, Cap, FillRule, Join, Paint, Stroke};
@@ -42,6 +43,34 @@ enum Glyphs {
     Builtin,
 }
 
+/// A name hashed and compared by the identity of its `Rc`, not its text. The fast font-cache key
+/// holds the name objects (so their addresses stay valid while cached) but does not hash the glyph
+/// names' bytes, which can be long and are read on every text operation.
+#[derive(Clone)]
+struct NamePtr(Option<Rc<str>>);
+
+impl NamePtr {
+    fn addr(&self) -> usize {
+        self.0.as_ref().map_or(0, |r| Rc::as_ptr(r) as *const () as usize)
+    }
+}
+
+impl PartialEq for NamePtr {
+    fn eq(&self, other: &Self) -> bool {
+        self.addr() == other.addr()
+    }
+}
+impl Eq for NamePtr {}
+impl Hash for NamePtr {
+    fn hash<H: Hasher>(&self, h: &mut H) {
+        self.addr().hash(h);
+    }
+}
+
+/// A fast, pointer-identity font-cache key: the base name, a discriminant (0 built-in, 1 encoding,
+/// 2 one glyph), the single glyph, and the encoding's glyph-name objects.
+type FastKey = (NamePtr, u8, NamePtr, Box<[NamePtr]>);
+
 pub(crate) struct Interp {
     pub b: Builder,
     st: Vec<V>,
@@ -60,6 +89,9 @@ pub(crate) struct Interp {
     /// Fonts built for drawing, by base font and the glyph names of their encoding, which the
     /// key shares with the dictionaries that hold them.
     font_cache: HashMap<FontKey, Rc<Font>>,
+    /// A pointer-identity accelerator in front of `font_cache`: the same dictionary drawn again is
+    /// answered without hashing its glyph names. Cleared when large; `font_cache` is the truth.
+    font_fast: HashMap<FastKey, Rc<Font>>,
     page: [f64; 4],
     pub unknown: Vec<String>,
 }

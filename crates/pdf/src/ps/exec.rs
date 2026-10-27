@@ -57,6 +57,7 @@ impl Interp {
             font_dir: new_dict(),
             embedded: HashMap::new(),
             font_cache: HashMap::new(),
+            font_fast: HashMap::new(),
             page,
             unknown: vec![],
         }
@@ -65,25 +66,16 @@ impl Interp {
     pub fn run(&mut self, data: &[u8]) {
         self.embedded = embedded_fonts(data);
         let mut src = Src::new(data);
-        while let Ok(Some(t)) = self.next_token(&mut src) {
+        while let Some(t) = src.token(0) {
             if let Err(Flow::Quit) = self.exec_token(t, &mut src) {
                 break;
             }
         }
     }
 
-    /// The next token of `src`, or none at its end. A name longer than [`MAX_NAME`] stops the
-    /// program there ([`Self::name_fits`]).
-    pub(super) fn next_token(&mut self, src: &mut Src) -> Result<Option<V>, Flow> {
-        let t = src.token(0);
-        if let Some(len) = src.long_name {
-            self.name_fits(len)?;
-        }
-        Ok(t)
-    }
-
-    /// Stop the program when a name or dictionary key of `len` bytes would be longer than
-    /// [`MAX_NAME`].
+    /// Stop the program when a name made or kept at runtime (`cvn`, a new dictionary key, a font
+    /// name from a string) of `len` bytes would be longer than [`MAX_NAME`]. Names read from the
+    /// file are not capped here (the file bounds them); running one is bounded in [`Self::exec_name`].
     pub(super) fn name_fits(&mut self, len: usize) -> Result<(), Flow> {
         if len <= MAX_NAME {
             return Ok(());
@@ -343,7 +335,12 @@ impl Interp {
 
     fn exec_name(&mut self, n: &str, src: &mut Src) -> Result<(), Flow> {
         self.spend(1)?;
-        if let Some(v) = self.lookup(n) {
+        // A name longer than any key a dictionary can hold ([`MAX_NAME`]) is no defined name and no
+        // operator, so it is not looked up — hashing it against every dictionary on the stack would
+        // scale with its length for one operation. It is noted like any unknown operator below.
+        if n.len() <= MAX_NAME
+            && let Some(v) = self.lookup(n)
+        {
             return match v {
                 V::Proc(_) => self.exec_obj(v, src),
                 // An operator stored under another name (`/mo /moveto load def`, as Illustrator's

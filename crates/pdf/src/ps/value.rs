@@ -112,15 +112,14 @@ pub(super) fn array(v: Vec<V>) -> V {
     V::Array(Rc::new(RefCell::new(v)))
 }
 
-/// Borrow an array/procedure and read exactly six numeric entries, ignoring nonnumeric entries.
+/// Read a six-number array or procedure as a matrix. A PostScript matrix is exactly six numbers,
+/// so a different length is rejected without scanning the whole thing: the read is O(1), not O(len)
+/// for an operand a program controls the size of (`concat`, `setmatrix`, `makefont`, a font's
+/// stored matrix read on every text operation).
 pub(super) fn matrix_of(v: &V) -> Option<Affine> {
     let read = |items: &[V]| {
-        let mut nums = items.iter().filter_map(V::num);
-        let mut a = [0.0; 6];
-        for n in &mut a {
-            *n = nums.next()?;
-        }
-        nums.next().is_none().then(|| Affine::new(a))
+        let [a, b, c, d, e, f] = items else { return None };
+        Some(Affine::new([a.num()?, b.num()?, c.num()?, d.num()?, e.num()?, f.num()?]))
     };
     match v {
         V::Array(a) => read(&a.borrow()),
