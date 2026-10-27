@@ -604,6 +604,33 @@ fn alt_wheel_over_a_long_expression_only_zooms_the_timeline() {
     assert!((after.min.y - laid_out.min.y).abs() < 1.0, "the text stays put: {after:?} from {laid_out:?}");
 }
 
+/// With Word Wrap, a line that only just fits the field's width stays on one line and doesn't
+/// scroll: the wheel over it scrolls the Timeline. The field measures its text wrapped at the
+/// width it draws it at.
+#[test]
+fn a_wrapped_line_that_just_fits_its_field_leaves_the_wheel_to_the_timeline() {
+    let (mut h, _) = harness();
+    h.state_mut().session.prefs.scripting.word_wrap = true;
+    // A number `n` digits long: in the editor's monospace font each digit is as wide as the next.
+    let digits = |n: usize| format!("1{}", "0".repeat(n - 1));
+    let (layer, opacity) = with_expression(&mut h, "opacity", &digits(20));
+    let set = |h: &mut Harness<'_, EffectcraftApp>, n: usize| {
+        h.state_mut().session.execute("prop.setExpression", json!({"layer": layer, "path": "transform/opacity", "expression": digits(n)})).unwrap();
+        h.run_steps(3);
+        text_drawn(h, "1000000000").0
+    };
+    let short = text_drawn(&h, "1000000000").0;
+    let advance = (set(&mut h, 60).width() - short.width()) / 40.0;
+    let field = rect_of(&h, &format!("timeline.prop.{opacity}.expression"));
+    let longest = ((field.max.x - short.min.x) / advance) as usize;
+    assert!(set(&mut h, longest + 1).height() > short.height() + 1.0, "{} digits wrap", longest + 1);
+    let laid_out = set(&mut h, longest);
+    assert!(laid_out.height() < short.height() + 1.0, "{longest} digits fit on one line: {laid_out:?} in {field:?}");
+    let scroll_y = h.state().ui.timeline.scroll_y;
+    wheel(&mut h, field.center(), -100.0);
+    assert!(h.state().ui.timeline.scroll_y > scroll_y, "the Timeline scrolls over a line that fits");
+}
+
 /// The line numbers sit beside the text, outside the part of the field that scrolls, so the wheel
 /// over them scrolls the Timeline, as anywhere else outside the text; over the text it scrolls
 /// the text.
