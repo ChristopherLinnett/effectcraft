@@ -29,13 +29,33 @@ impl V {
             _ => None,
         }
     }
-    pub(super) fn key(&self) -> String {
+    /// Run `f` on the text this value names as a key: a name's text and a UTF-8 string's bytes in
+    /// place, so looking a key up copies nothing; a number, a boolean or a string that isn't UTF-8
+    /// as a short-lived conversion; anything else as the empty key.
+    pub(super) fn with_key<R>(&self, f: impl FnOnce(&str) -> R) -> R {
         match self {
-            V::Name(n) | V::Lit(n) | V::Op(n) => n.to_string(),
-            V::Str(s) => String::from_utf8_lossy(&s.borrow()).into_owned(),
-            V::Num(n) => format!("{n}"),
-            V::Bool(b) => format!("{b}"),
-            _ => String::new(),
+            V::Name(n) | V::Lit(n) | V::Op(n) => f(n),
+            V::Str(s) => {
+                let b = s.borrow();
+                match std::str::from_utf8(&b) {
+                    Ok(t) => f(t),
+                    Err(_) => f(&String::from_utf8_lossy(&b)),
+                }
+            }
+            V::Num(n) => f(&format!("{n}")),
+            V::Bool(b) => f(if *b { "true" } else { "false" }),
+            _ => f(""),
+        }
+    }
+    /// A copy of the text this value names as a key ([`V::with_key`]).
+    pub(super) fn key(&self) -> String {
+        self.with_key(str::to_owned)
+    }
+    /// The name this value stands for: a name's own text, shared, else a copy of its key text.
+    pub(super) fn shared_name(&self) -> Rc<str> {
+        match self {
+            V::Name(n) | V::Lit(n) | V::Op(n) => n.clone(),
+            other => other.key().into(),
         }
     }
     /// The most bytes [`V::key`] allocates: a string's worst-case lossy UTF-8 copy (each invalid

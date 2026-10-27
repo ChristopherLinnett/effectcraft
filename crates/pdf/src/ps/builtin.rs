@@ -83,7 +83,7 @@ impl Interp {
                 self.st.pop();
                 let d = new_dict();
                 for kv in items.as_chunks::<2>().0 {
-                    self.dict_insert(&d, kv[0].key(), kv[1].clone())?;
+                    self.dict_insert(&d, &kv[0], kv[1].clone())?;
                 }
                 self.push(V::Dict(d));
             }
@@ -247,12 +247,15 @@ impl Interp {
                 let p = self.pop();
                 match self.pop() {
                     V::Dict(d) => {
-                        let items: Vec<(String, V)> = d.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                        for (k, v) in items {
+                        // The entries are snapshotted before the procedure runs (it may change the
+                        // dictionary), each key as a literal name of its own the procedure can
+                        // keep: charge the key copies before taking it.
+                        for k in d.borrow().keys() {
+                            self.charge_key(k)?;
+                        }
+                        let items: Vec<(V, V)> = d.borrow().iter().map(|(k, v)| (V::Lit(k.as_str().into()), v.clone())).collect();
+                        for (key, v) in items {
                             self.spend(1)?;
-                            // Each run hands the procedure a fresh copy of the key, which it can keep.
-                            let key = V::Lit(k.into());
-                            self.allocate(key.key_bytes())?;
                             self.push(key);
                             self.push(v);
                             match self.exec_obj(p.clone(), src) {
@@ -301,35 +304,31 @@ impl Interp {
             // Dictionaries.
             "def" => {
                 let v = self.pop();
-                let k = self.pop().key();
+                let k = self.pop();
                 if let Some(d) = self.dicts.last().cloned() {
-                    self.dict_insert(&d, k, v)?;
+                    self.dict_insert(&d, &k, v)?;
                 }
             }
             "store" => {
                 let v = self.pop();
-                let k = self.pop().key();
-                let d = self.dicts.iter().rev().find(|d| d.borrow().contains_key(&k)).or(self.dicts.last()).cloned();
-                if let Some(d) = d {
-                    self.dict_insert(&d, k, v)?;
+                let k = self.pop();
+                if let Some(d) = self.defining_dict(&k).or_else(|| self.dicts.last().cloned()) {
+                    self.dict_insert(&d, &k, v)?;
                 }
             }
             "load" => {
-                let k = self.pop().key();
-                let v = match self.lookup(&k) {
+                let k = self.pop();
+                let v = match k.with_key(|t| self.lookup(t)) {
                     Some(v) => v,
                     // The operator keeps the whole name, however long the file made it.
-                    None => {
-                        self.allocate(k.len())?;
-                        V::Op(k.into())
-                    }
+                    None => V::Op(self.converted_key(&k)?.into()),
                 };
                 self.push(v);
             }
             "undef" => {
-                let k = self.pop().key();
+                let k = self.pop();
                 if let V::Dict(d) = self.pop() {
-                    d.borrow_mut().remove(&k);
+                    k.with_key(|t| d.borrow_mut().remove(t));
                 }
             }
             "dict" => {
@@ -357,8 +356,8 @@ impl Interp {
                 self.push(V::Dict(d));
             }
             "where" => {
-                let k = self.pop().key();
-                match self.dicts.iter().rev().find(|d| d.borrow().contains_key(&k)).cloned() {
+                let k = self.pop();
+                match self.defining_dict(&k) {
                     Some(d) => {
                         self.push(V::Dict(d));
                         self.push(V::Bool(true));
@@ -367,9 +366,9 @@ impl Interp {
                 }
             }
             "known" => {
-                let k = self.pop().key();
+                let k = self.pop();
                 let v = match self.pop() {
-                    V::Dict(d) => d.borrow().contains_key(&k),
+                    V::Dict(d) => k.with_key(|t| d.borrow().contains_key(t)),
                     _ => false,
                 };
                 self.push(V::Bool(v));
@@ -377,24 +376,23 @@ impl Interp {
             "countdictstack" => self.push(V::Num(self.dicts.len() as f64)),
             "cleardictstack" => self.dicts.truncate(1),
             "findresource" | "findfont" | "findencoding" => {
-                let category = if n == "findresource" { self.pop().key() } else { String::new() };
-                let key = self.pop().key();
-                match (n, category.as_str()) {
-                    ("findfont", _) | (_, "Font") => {
-                        let f = self.find_font(&key)?;
-                        self.push(V::Dict(f));
-                    }
-                    ("findencoding", _) | (_, "Encoding") => self.push_encoding(&key)?,
-                    _ => self.push(V::Dict(new_dict())),
+                let category = if n == "findresource" { self.pop() } else { V::Null };
+                let key = self.pop();
+                if n == "findfont" || category.with_key(|t| t == "Font") {
+                    let f = self.find_font(&key)?;
+                    self.push(V::Dict(f));
+                } else if n == "findencoding" || category.with_key(|t| t == "Encoding") {
+                    key.with_key(|t| self.push_encoding(t))?;
+                } else {
+                    self.push(V::Dict(new_dict()));
                 }
             }
             "defineresource" => {
-                let category = self.pop().key();
+                let category = self.pop();
                 let v = self.pop();
-                let key = self.pop().key();
-                if let (V::Dict(d), "Font") = (&v, category.as_str()) {
-                    self.charge_key(!self.font_dir.contains_key(&key), &key)?;
-                    self.font_dir.insert(key, d.clone());
+                let key = self.pop();
+                if matches!(v, V::Dict(_)) && category.with_key(|t| t == "Font") {
+                    self.define_font(&key, v.clone())?;
                 }
                 self.push(v);
             }
@@ -426,7 +424,7 @@ impl Interp {
             "get" => {
                 let k = self.pop();
                 let v = match self.pop() {
-                    V::Dict(d) => d.borrow().get(&k.key()).cloned().unwrap_or(V::Null),
+                    V::Dict(d) => k.with_key(|t| d.borrow().get(t).cloned()).unwrap_or(V::Null),
                     V::Str(s) => V::Num(s.borrow().get(k.num().unwrap_or(0.0) as usize).copied().unwrap_or(0) as f64),
                     V::Array(a) => a.borrow().get(k.num().unwrap_or(0.0) as usize).cloned().unwrap_or(V::Null),
                     V::Proc(p) => p.get(k.num().unwrap_or(0.0) as usize).cloned().unwrap_or(V::Null),
@@ -438,7 +436,7 @@ impl Interp {
                 let v = self.pop();
                 let k = self.pop();
                 match self.pop() {
-                    V::Dict(d) => self.dict_insert(&d, k.key(), v)?,
+                    V::Dict(d) => self.dict_insert(&d, &k, v)?,
                     V::Array(a) => {
                         let i = k.num().unwrap_or(0.0) as usize;
                         if let Some(slot) = a.borrow_mut().get_mut(i) {
@@ -571,7 +569,7 @@ impl Interp {
                 self.push(V::Str(Rc::new(RefCell::new(b"3010".to_vec()))));
             }
             "save" => {
-                self.spend(self.gs.path.elements().len())?;
+                self.charge_gstate_copy()?;
                 self.saved.push(self.gs.clone());
                 self.gs.depth = self.b.depth();
                 self.push(V::Null);
@@ -660,13 +658,14 @@ impl Interp {
             // 0 reads to its end-of-data string: skip that data (an embedded XMP packet, which
             // otherwise ran as PostScript). Other filters read what their source reads.
             "filter" => {
-                let name = self.pop().key();
+                let name = self.pop();
                 let mut skipped = false;
-                let source = if name == "SubFileDecode" && !matches!(self.st.last(), Some(V::Dict(_))) {
+                let source = if name.with_key(|t| t == "SubFileDecode") && !matches!(self.st.last(), Some(V::Dict(_))) {
                     let eod = match self.pop() {
-                        V::Str(s) => s.borrow().clone(),
-                        _ => vec![],
+                        V::Str(s) => s,
+                        _ => Rc::default(),
                     };
+                    let eod = eod.borrow();
                     let count = self.popn();
                     let source = self.pop();
                     if matches!(source, V::File) && count == 0.0 && !eod.is_empty() {
@@ -693,7 +692,7 @@ impl Interp {
             }
             // Graphics state.
             "gsave" => {
-                self.spend(self.gs.path.elements().len())?;
+                self.charge_gstate_copy()?;
                 let mut g = self.gs.clone();
                 g.depth = self.b.depth();
                 self.saved.push(g);
@@ -994,8 +993,12 @@ impl Interp {
                 self.b.skip("image");
             }
             _ => {
-                if self.unknown.len() < 32 && !self.unknown.iter().any(|u| u == n) {
-                    self.unknown.push(n.to_string());
+                // Noted for the report by the start of the name, however long the file made it.
+                if self.unknown.len() < 32 {
+                    let name: String = n.chars().take(64).collect();
+                    if !self.unknown.contains(&name) {
+                        self.unknown.push(name);
+                    }
                 }
             }
         }

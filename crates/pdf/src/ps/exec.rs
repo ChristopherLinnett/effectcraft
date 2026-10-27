@@ -7,6 +7,10 @@ use super::*;
 /// The deepest procedure nesting run (deeper recursion stops the program).
 const MAX_CALL_DEPTH: usize = 256;
 
+/// The most copies of the graphics state `gsave` and `save` keep at once. Documents nest a
+/// handful; deeper nesting is a runaway program.
+pub(super) const MAX_SAVE_DEPTH: usize = 1024;
+
 /// The most operands retained on the operand stack.
 pub(super) const MAX_STACK: usize = 100_000;
 
@@ -38,7 +42,7 @@ impl Interp {
             budget: 8_000_000,
             allocation_budget: MAX_ALLOCATION,
             calls: 0,
-            font_dir: HashMap::new(),
+            font_dir: new_dict(),
             embedded: HashMap::new(),
             font_cache: HashMap::new(),
             page,
@@ -105,41 +109,80 @@ impl Interp {
         Ok(v.items().unwrap_or_default())
     }
 
-    /// Charge everything [`V::key`] allocates before producing it: the key a conversion
-    /// (`cvs`, `cvn`) keeps is as long as the text it converts, whatever its type.
+    /// A copy of the key text `v` names (what a conversion such as `cvs` or `cvn` keeps), its
+    /// exact length charged before the copy is made. The text is read in place for a name or a
+    /// UTF-8 string; a number, a boolean or a string that isn't UTF-8 is converted first.
     pub(super) fn converted_key(&mut self, v: &V) -> Result<String, Flow> {
-        self.allocate(v.key_bytes())?;
-        Ok(v.key())
+        v.with_key(|t| {
+            self.allocate(t.len())?;
+            Ok(t.to_owned())
+        })
     }
 
-    /// Charge a key a dictionary is adding (`new`): it keeps its own copy, so a new key counts
-    /// against the budget once, like any kept text; replacing an existing key's value keeps the
-    /// copy it has and costs nothing.
-    pub(super) fn charge_key(&mut self, new: bool, k: &str) -> Result<(), Flow> {
-        if new { self.allocate(k.len()) } else { Ok(()) }
+    /// Charge a copy of the dictionary key `k` before it is made: the copies a font copy or
+    /// `forall` takes of every key.
+    pub(super) fn charge_key(&mut self, k: &str) -> Result<(), Flow> {
+        self.allocate(k.len())
     }
 
-    /// Put `v` under `k` in `d`, charging the key if it is new ([`Self::charge_key`]).
-    pub(super) fn dict_insert(&mut self, d: &DictRef, k: String, v: V) -> Result<(), Flow> {
-        let new = !d.borrow().contains_key(&k);
-        self.charge_key(new, &k)?;
-        d.borrow_mut().insert(k, v);
-        Ok(())
+    /// Put `v` in `d` under the key `k` names. A key `d` already has keeps its copy and only its
+    /// value is replaced, at no cost; a new key is a copy the dictionary keeps, its exact length
+    /// charged before it is made.
+    pub(super) fn dict_insert(&mut self, d: &DictRef, k: &V, v: V) -> Result<(), Flow> {
+        k.with_key(|t| {
+            if let Some(slot) = d.borrow_mut().get_mut(t) {
+                *slot = v;
+                return Ok(());
+            }
+            self.allocate(t.len())?;
+            d.borrow_mut().insert(t.to_owned(), v);
+            Ok(())
+        })
+    }
+
+    /// Put the font dictionary `d` in Font Directory under the key `k` names ([`Self::dict_insert`]).
+    pub(super) fn define_font(&mut self, k: &V, d: V) -> Result<(), Flow> {
+        let dir = self.font_dir.clone();
+        self.dict_insert(&dir, k, d)
+    }
+
+    /// The innermost dictionary on the dictionary stack that defines the key `k` names.
+    pub(super) fn defining_dict(&self, k: &V) -> Option<DictRef> {
+        k.with_key(|t| self.dicts.iter().rev().find(|d| d.borrow().contains_key(t)).cloned())
+    }
+
+    /// Check room for, and charge, a copy of the graphics state (`gsave`, `save`): at most
+    /// [`MAX_SAVE_DEPTH`] are kept at once, their path elements count as operations, and their
+    /// dash arrays are charged by their numbers.
+    pub(super) fn charge_gstate_copy(&mut self) -> Result<(), Flow> {
+        if self.saved.len() >= MAX_SAVE_DEPTH {
+            self.b.skip("PostScript (graphics state depth limit)");
+            return Err(Flow::Quit);
+        }
+        self.spend(self.gs.path.elements().len())?;
+        let dash = self.gs.dash.as_ref().map_or(0, |(a, _)| a.len());
+        self.allocate(dash.saturating_mul(std::mem::size_of::<f64>()))
     }
 
     /// Precharge a string's worst-case lossy UTF-8 copy before producing the existing equality key.
     /// A name's key is copied only for the comparison, and names are outside the payload budget.
     pub(super) fn comparison_key(&mut self, v: &V) -> Result<String, Flow> {
-        match v {
-            V::Str(_) => self.converted_key(v),
-            _ => Ok(v.key()),
+        if let V::Str(_) = v {
+            self.allocate(v.key_bytes())?;
         }
+        Ok(v.key())
     }
 
-    /// Charge the six matrix slots before constructing and pushing their array.
-    pub(super) fn push_matrix(&mut self, m: Affine) -> Result<(), Flow> {
+    /// A new matrix array, its six slots charged before it is made.
+    pub(super) fn matrix(&mut self, m: Affine) -> Result<V, Flow> {
         self.allocate_items(6)?;
-        self.push(matrix_val(m));
+        Ok(matrix_val(m))
+    }
+
+    /// Push a new matrix array ([`Self::matrix`]).
+    pub(super) fn push_matrix(&mut self, m: Affine) -> Result<(), Flow> {
+        let v = self.matrix(m)?;
+        self.push(v);
         Ok(())
     }
 

@@ -127,21 +127,31 @@ ffmpeg elsewhere) to check the code tables against an independent implementation
   complete result before copying; exceeding it stops execution with an operand-stack-limit
   note in `Doc::skipped`, keeping artwork already drawn. `astore` consumes its operands before
   returning its array, so it does not increase stack depth.
-  Runtime array/procedure payloads and string bytes have a cumulative 256 MiB allocation
-  budget (array slots are charged at `size_of::<V>()`); dropping or overwriting an object does
-  not refund it. Constructors, intervals, conversions and bulk operand/snapshot copies share
-  this budget. `load` of an undefined name charges the name its operator keeps, `forall` over a
-  dictionary charges each copy of a key it hands out, and a conversion (`cvs`, `cvn`) charges
-  the whole text it produces, whatever it converts (a string, a name or such an operator). A
-  dictionary charges each key once, when it is added (`def`, `store`, `put`, `>>`, the copy
-  `scalefont` and `makefont` make, a new font name for `findfont` or `definefont`); putting a
-  new value under an existing key is free. Executable strings and lossy UTF-8 comparison copies
-  are charged conservatively before tokenization or conversion. Constructor limits remain
-  1,000,000 array slots and 10,000,000 string bytes. Exhaustion stops execution with an
-  allocation-limit note rather than continuing with partial results.
-  This is not a process-memory guarantee: source tokens (names included), dictionary objects
-  and their capacity, font internals, graphics/output, container capacity and allocator overhead
-  are outside this payload budget.
+  Runtime payloads have a cumulative 256 MiB allocation budget, never refunded when an object
+  is dropped or overwritten. What an operator keeps is charged before it is allocated: array and
+  procedure slots at `size_of::<V>()`, string bytes, and kept text at its exact length (a
+  number, a boolean or a string that isn't UTF-8 is converted for the moment first, to measure
+  it). That covers constructors, intervals, conversions (`cvs`, `cvn`), bulk operand and
+  snapshot copies (`aload`, `copy`, `getinterval`, and `forall`, which charges the copies of a
+  dictionary's keys before taking them), matrices (six slots each, a font's included), encoding
+  arrays (256 slots), the dash array `gsave` or `save` copies, executable strings (charged
+  conservatively before tokenization) and lossy UTF-8 comparison copies. A dictionary charges a
+  key once, when it is new (`def`, `store`, `put`, `>>`, `defineresource`, `definefont`, a new
+  font for `findfont` or `selectfont`, the copy `scalefont`, `makefont` and `selectfont` make);
+  replacing an existing key's value copies and costs nothing. `load` of an undefined name
+  charges the name its operator keeps. A font built for drawing (by its base name and the first
+  256 glyph names of its encoding, or the one glyph `glyphshow` draws) charges the font, its
+  glyph-name table and its cache key, once; drawing with it again charges only the string shown.
+  Constructor limits remain 1,000,000 array slots and 10,000,000 string bytes, and at most
+  1,024 graphics-state copies (`gsave`, `save`) are kept at once. Reaching a limit stops
+  execution with a note (allocation limit, graphics state depth limit) rather than continuing
+  with partial results.
+  This is not a process-memory guarantee. Outside the budget: source tokens (the file's names
+  and strings) and the embedded font programs read from it; the operand stack (at most 100,000
+  values); lookup keys, read in place or converted only for the moment; a dictionary's storage
+  beyond its keys, including the entry list `forall` takes of one; paths, including those in
+  graphics-state copies, which the operation and path limits bound; drawn output; font program
+  internals; container capacity and allocator overhead.
 - **Create Shapes from Vector Layer:** clips that enclose the whole page become layer masks
   (the first clip Add, later ones Intersect). Nested clipping groups become Merge Paths: each
   closed shape inside them is a group with its geometry merged into one compound path, the clip

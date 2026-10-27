@@ -29,6 +29,19 @@ mod value;
 pub use eps::eps_parts;
 use value::{DictRef, GState, V};
 
+/// A drawable font's cache key: its base font name and the glyph names it draws with.
+type FontKey = (Rc<str>, Glyphs);
+
+/// The glyph names a drawable font gives codes 0 to 255, shared with the values that hold them:
+/// the first 256 entries of its encoding ([`Font::standalone`] reads no more), the one glyph
+/// `glyphshow` draws as code 65, or its program's own.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Glyphs {
+    Encoding(Vec<Option<Rc<str>>>),
+    One(Rc<str>),
+    Builtin,
+}
+
 pub(crate) struct Interp {
     pub b: Builder,
     st: Vec<V>,
@@ -40,12 +53,13 @@ pub(crate) struct Interp {
     allocation_budget: usize,
     /// Nested procedure calls (recursion is cut off at [`MAX_CALL_DEPTH`]).
     calls: usize,
-    /// Fonts by name: `definefont`d dictionaries.
-    font_dir: HashMap<String, DictRef>,
+    /// Fonts by name (Font Directory): `definefont`d and `findfont`-made dictionaries.
+    font_dir: DictRef,
     /// Embedded font programs found in the file (name → (program, CFF)).
     embedded: HashMap<String, (Rc<Vec<u8>>, bool)>,
-    /// Fonts built for drawing, by base font and encoding.
-    font_cache: HashMap<String, Rc<Font>>,
+    /// Fonts built for drawing, by base font and the glyph names of their encoding, which the
+    /// key shares with the dictionaries that hold them.
+    font_cache: HashMap<FontKey, Rc<Font>>,
     page: [f64; 4],
     pub unknown: Vec<String>,
 }

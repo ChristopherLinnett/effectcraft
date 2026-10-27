@@ -528,3 +528,159 @@ fn eps_dictionary_keys_are_charged_once() {
     let (nodes, _, skipped) = it.b.finish();
     assert!(skipped.is_empty() && nodes.len() == 1, "overwrites are free: {skipped:?}");
 }
+
+/// `forall` over a dictionary snapshots its entries before running the procedure, each key as a
+/// literal name of its own: the whole snapshot is charged before it is taken, however early the
+/// procedure exits. Five 10 000-byte keys need exactly 50 000 bytes.
+#[test]
+fn eps_forall_charges_the_dictionary_snapshot_first() {
+    let a = "a".repeat(9_999);
+    let setup = format!("/d 5 dict def d /{a}0 0 put d /{a}1 0 put d /{a}2 0 put d /{a}3 0 put d /{a}4 0 put");
+    for (budget, fits) in [(50_000, true), (49_999, false)] {
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        it.run(setup.as_bytes());
+        it.allocation_budget = budget;
+        it.run(b"d { pop pop exit } forall 0 0 10 10 rectfill");
+        let left = it.allocation_budget;
+        let (nodes, _, skipped) = it.b.finish();
+        if fits {
+            assert!(left == 0 && nodes.len() == 1 && skipped.is_empty(), "{budget}: {left} left, {skipped:?}");
+        } else {
+            assert!(nodes.is_empty() && skipped == ["PostScript (allocation limit)"], "{budget}: {skipped:?}");
+        }
+    }
+}
+
+/// A new font keeps its name, its keys and two six-slot matrices (FontMatrix and its own); a
+/// `scalefont` copy keeps its keys and a matrix of its own; a font `definefont` completes keeps the
+/// program's name, two keys and a matrix: all charged, matrices by their slots.
+#[test]
+fn eps_fonts_charge_their_keys_and_matrices() {
+    let slot = std::mem::size_of::<V>();
+    let keys: usize = ["FontName", "FontType", "FontMatrix", "FID", "__base", "__m"].iter().map(|k| k.len()).sum();
+    let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+    let spent = |it: &mut Interp, ps: &[u8]| {
+        let before = it.allocation_budget;
+        it.run(ps);
+        before - it.allocation_budget
+    };
+    // The name, once for the font and once as its Font Directory key.
+    assert_eq!(spent(&mut it, b"/F findfont pop"), 1 + keys + 12 * slot + 1, "findfont of a new font");
+    assert_eq!(spent(&mut it, b"/F findfont pop"), 0, "findfont of a known font");
+    assert_eq!(spent(&mut it, b"/F findfont 10 scalefont pop"), keys + 6 * slot, "scalefont");
+    assert_eq!(spent(&mut it, b"/G 1 dict definefont pop"), 1 + "__base".len() + "__m".len() + 6 * slot + 1, "definefont");
+}
+
+/// `glyphshow` draws through a cached font that names just that glyph: the first use of a glyph
+/// charges what that font keeps, and drawing it again costs nothing, however many times.
+#[test]
+fn eps_glyphshow_charges_a_new_glyph_once() {
+    use std::mem::size_of;
+    let entry = |glyph: &str| size_of::<Font>() + 256 * size_of::<Option<String>>() + "F".len() + glyph.len() + 255 * ".notdef".len();
+    let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+    it.run(b"/F findfont 10 scalefont setfont 0 0 moveto");
+    let mut spent = |ps: &[u8]| {
+        let before = it.allocation_budget;
+        it.run(ps);
+        before - it.allocation_budget
+    };
+    assert_eq!(spent(b"/A glyphshow"), entry("A"), "a new glyph");
+    assert_eq!(spent(b"1000 { /A glyphshow } repeat"), 0, "the same glyph again");
+    assert_eq!(spent(b"/Bee glyphshow"), entry("Bee"), "another glyph");
+}
+
+/// `gsave` and `save` keep a copy of the graphics state, dash array included: each copy's dash
+/// is charged, and at most `MAX_SAVE_DEPTH` copies are kept at once.
+#[test]
+fn eps_gsave_charges_the_dash_it_copies() {
+    let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+    it.run(b"/a 1000 array def 0 1 999 { a exch 1 put } for a 0 setdash");
+    let dash = 1000 * std::mem::size_of::<f64>();
+    for op in ["gsave", "save pop"] {
+        let before = it.allocation_budget;
+        it.run(op.as_bytes());
+        assert_eq!(before - it.allocation_budget, dash, "{op}");
+    }
+    it.allocation_budget = 3 * dash - 1;
+    it.run(b"3 { gsave } repeat 0 0 10 10 rectfill");
+    let (nodes, _, skipped) = it.b.finish();
+    assert!(nodes.is_empty() && skipped == ["PostScript (allocation limit)"], "three copies past the budget: {skipped:?}");
+}
+
+/// Graphics-state copies stop at `MAX_SAVE_DEPTH`: a runaway `gsave` loop ends there, with a note,
+/// instead of growing the state stack until the operation limit.
+#[test]
+fn eps_gsave_stops_at_the_depth_limit() {
+    use super::exec::MAX_SAVE_DEPTH;
+    let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+    it.run(b"0 0 10 10 rectfill { { gsave } loop } loop");
+    assert_eq!(it.saved.len(), MAX_SAVE_DEPTH);
+    let (nodes, _, skipped) = it.b.finish();
+    assert!(nodes.len() == 1 && skipped == ["PostScript (graphics state depth limit)"], "{skipped:?}");
+}
+
+/// A font's encoding is read in place to find its cached font, so showing text with a font
+/// already built costs nothing more; building it charges what it keeps first: the font, its
+/// 256-name glyph table, its base name and the first 256 encoding entries it is cached by.
+#[test]
+fn eps_text_charges_a_new_fonts_encoding_names_once() {
+    use std::mem::size_of;
+    let entry = |name: &str, slots: usize| {
+        size_of::<Font>() + 256 * size_of::<Option<String>>() + "Helvetica".len() + slots * size_of::<Option<Rc<str>>>() + 256 * name.len()
+    };
+    let font = |name: &str, size: usize| {
+        format!(
+            "/n /{name} def /e {size} array def 0 1 {} {{ e exch n put }} for /f 3 dict def f /FontName /Helvetica put f /Encoding e put f setfont 0 0 moveto",
+            size - 1
+        )
+    };
+    let long = "n".repeat(10_000);
+    let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+    it.run(font(&long, 256).as_bytes());
+    it.allocation_budget = 100_000;
+    it.run(b"(A) show 0 0 10 10 rectfill");
+    let (nodes, _, skipped) = it.b.finish();
+    assert!(nodes.is_empty() && skipped == ["PostScript (allocation limit)"], "256 copies of a 10 000-byte name: {skipped:?}");
+
+    // An encoding longer than 256 entries is cached by its first 256: what a font reads.
+    for size in [256, 1_000_000] {
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        it.run(font("A", size).as_bytes());
+        let before = it.allocation_budget;
+        it.run(b"(A) show");
+        assert_eq!(before - it.allocation_budget, 1 + entry("A", 256), "{size} entries: the shown string and the new font");
+        let before = it.allocation_budget;
+        it.run(b"(A) show");
+        assert_eq!(before - it.allocation_budget, 1, "{size} entries: the second show charges only its string");
+    }
+}
+
+/// An unknown operator is noted for the report by the start of its name only, however long the
+/// name the file made.
+#[test]
+fn eps_unknown_operators_keep_a_short_name() {
+    let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+    it.run(format!("({}) cvn cvx exec", "x".repeat(10_000)).as_bytes());
+    assert!(!it.unknown.is_empty() && it.unknown.iter().all(|u| u.chars().count() <= 64), "{:?}", it.unknown.iter().map(String::len).collect::<Vec<_>>());
+}
+
+/// A dictionary or a conversion charges the exact length of the key text it copies: a number's
+/// formatted length, a UTF-8 string's own length, a string that isn't UTF-8 by its replacement.
+#[test]
+fn eps_keys_and_conversions_charge_exact_lengths() {
+    let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+    it.run(b"/d 3 dict def");
+    for (ps, bytes) in [
+        ("d 12345 0 put", 5),
+        ("d (abc) 0 put", 3),
+        ("d <ff> 0 put", "\u{fffd}".len()),
+        ("d 12345 1 put", 0),
+        ("(abc) cvn pop", 3),
+        ("12345 0 string cvs pop", 5),
+        ("true 0 string cvs pop", 4),
+    ] {
+        let before = it.allocation_budget;
+        it.run(ps.as_bytes());
+        assert_eq!(before - it.allocation_budget, bytes, "{ps}");
+    }
+}
