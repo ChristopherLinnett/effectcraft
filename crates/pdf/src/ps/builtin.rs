@@ -313,7 +313,14 @@ impl Interp {
             }
             "load" => {
                 let k = self.pop().key();
-                let v = self.lookup(&k).unwrap_or(V::Op(k.into()));
+                let v = match self.lookup(&k) {
+                    Some(v) => v,
+                    // The operator keeps the whole name, however long the file made it.
+                    None => {
+                        self.allocate(k.len())?;
+                        V::Op(k.into())
+                    }
+                };
                 self.push(v);
             }
             "undef" => {
@@ -526,20 +533,14 @@ impl Interp {
                 v => self.push(v),
             },
             "cvn" => {
-                let k = self.pop().key();
+                let v = self.pop();
+                let k = self.converted_key(&v)?;
                 self.push(V::Lit(k.into()));
             }
             "cvs" => {
                 self.pop();
                 let v = self.pop();
-                let bytes = match &v {
-                    V::Str(s) => s.borrow().len().saturating_mul(3),
-                    V::Name(s) | V::Lit(s) => s.len(),
-                    // f64's non-exponential decimal representation, a boolean or an empty key.
-                    _ => 512,
-                };
-                self.allocate(bytes)?;
-                let k = v.key();
+                let k = self.converted_key(&v)?;
                 self.push(V::Str(Rc::new(RefCell::new(k.into_bytes()))));
             }
             "xcheck" => {

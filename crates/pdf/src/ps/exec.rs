@@ -105,13 +105,20 @@ impl Interp {
         Ok(v.items().unwrap_or_default())
     }
 
-    /// Precharge a string's worst-case lossy UTF-8 copy before producing the existing equality key.
-    pub(super) fn comparison_key(&mut self, v: &V) -> Result<String, Flow> {
-        if let V::Str(s) = v {
-            // Lossy UTF-8 replaces each invalid byte with at most three output bytes.
-            self.allocate(s.borrow().len().saturating_mul(3))?;
-        }
+    /// Charge everything [`V::key`] allocates before producing it: the key a conversion
+    /// (`cvs`, `cvn`) keeps is as long as the text it converts, whatever its type.
+    pub(super) fn converted_key(&mut self, v: &V) -> Result<String, Flow> {
+        self.allocate(v.key_bytes())?;
         Ok(v.key())
+    }
+
+    /// Precharge a string's worst-case lossy UTF-8 copy before producing the existing equality key.
+    /// A name's key is copied only for the comparison, and names are outside the payload budget.
+    pub(super) fn comparison_key(&mut self, v: &V) -> Result<String, Flow> {
+        match v {
+            V::Str(_) => self.converted_key(v),
+            _ => Ok(v.key()),
+        }
     }
 
     /// Charge the six matrix slots before constructing and pushing their array.

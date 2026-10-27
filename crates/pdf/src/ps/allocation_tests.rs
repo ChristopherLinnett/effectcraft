@@ -453,3 +453,44 @@ fn eps_interpreters_start_with_a_256_mib_allocation_budget() {
         }
     }
 }
+
+/// Text bytes a value holds: its string or name, and those of the arrays inside it.
+fn held_text(v: &V) -> usize {
+    match v {
+        V::Str(s) => s.borrow().len(),
+        V::Name(n) | V::Lit(n) | V::Op(n) => n.len(),
+        V::Array(a) => a.borrow().iter().map(held_text).sum(),
+        V::Proc(p) => p.iter().map(held_text).sum(),
+        _ => 0,
+    }
+}
+
+/// `load` of an undefined name keeps the name in the operator it makes, and `cvs` and `cvn`
+/// keep the text they convert to, so each charges that text's full length first: an operator, a
+/// name or a string, made or converted over and over and kept in an array, never holds more than
+/// the budget.
+#[test]
+fn eps_conversions_charge_the_text_they_keep() {
+    let long = "a".repeat(10_000);
+    let budget = 100_000;
+    let mut over = vec![];
+    for (what, body) in [
+        ("load of an undefined name", format!("/{long} load")),
+        ("load of an undefined string", format!("({long}) load")),
+        ("cvs of a loaded operator", format!("/{long} load 0 string cvs")),
+        ("cvs of a name", format!("/{long} 0 string cvs")),
+        ("cvs of a string", format!("({long}) 0 string cvs")),
+        ("cvn of a loaded operator", format!("/{long} load cvn")),
+        ("cvn of a string", format!("({long}) cvn")),
+    ] {
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        it.allocation_budget = budget;
+        it.run(format!("[ 50 {{ {body} }} repeat ] 0 0 10 10 rectfill").as_bytes());
+        let held: usize = it.st.iter().map(held_text).sum();
+        let (nodes, _, skipped) = it.b.finish();
+        if held > budget || !nodes.is_empty() || skipped != ["PostScript (allocation limit)"] {
+            over.push(format!("{what}: {held} bytes kept, {skipped:?}"));
+        }
+    }
+    assert!(over.is_empty(), "conversions past a {budget}-byte budget: {over:#?}");
+}

@@ -38,6 +38,18 @@ impl V {
             _ => String::new(),
         }
     }
+    /// The most bytes [`V::key`] allocates: a string's worst-case lossy UTF-8 copy (each invalid
+    /// byte becomes at most three), a name's length, at most 512 for a number (f64's
+    /// non-exponential decimal form stays under it), 5 for a boolean and none for an empty key.
+    pub(super) fn key_bytes(&self) -> usize {
+        match self {
+            V::Str(s) => s.borrow().len().saturating_mul(3),
+            V::Name(n) | V::Lit(n) | V::Op(n) => n.len(),
+            V::Num(_) => 512,
+            V::Bool(_) => 5,
+            _ => 0,
+        }
+    }
     /// Return the array/procedure length without cloning its payload; other values have no items.
     pub(super) fn item_count(&self) -> usize {
         match self {
