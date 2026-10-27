@@ -370,15 +370,17 @@ pub fn editor(
     }
     // Text taller than the field's rows, or wider than the field without Word Wrap, scrolls
     // inside it instead of spilling over the rows below (#1396); nothing draws outside those
-    // rows. A line of the default font with its margins fills one row exactly, a little more
-    // than a one-row field, so such a field doesn't scroll by a few pixels and keeps the wheel
-    // for the Timeline. The scroll bars float over the text, so a one-line field keeps its
-    // line, and show a thin handle while there is more to see. The editor fills the field, so a
-    // click anywhere in it edits.
+    // rows. Up and down, the text is taller when its glyphs end past its rows. They are drawn
+    // from the top of the field: the editor has no frame, and egui applies its margin only to a
+    // frame of its own. A line's box reaches a little past its glyphs, so measuring boxes would
+    // make a line that fits its row scroll by a few pixels and take the wheel from the Timeline.
+    // The scroll bars float over the text, so a one-line field keeps its line, and show a thin
+    // handle while there is more to see. The editor fills the field, so a click anywhere in it
+    // edits.
     let margin = egui::Margin::symmetric(4, 2);
     let wrap = if p.word_wrap { er.width() - margin.sum().x } else { f32::INFINITY };
-    let tall = layouter(&child, &*buf, wrap).rect.height() + margin.sum().y > room + 0.5;
     let rows = Rect::from_center_size(rect.center(), vec2(rect.width(), room));
+    let tall = rect.min.y + layouter(&child, &*buf, wrap).mesh_bounds.max.y > rows.max.y + 0.5;
     child.set_clip_rect(child.clip_rect().intersect(rows));
     child.spacing_mut().scroll = egui::style::ScrollStyle { dormant_handle_opacity: 0.6, ..egui::style::ScrollStyle::floating() };
     let scroll = egui::ScrollArea::new([!p.word_wrap, tall])

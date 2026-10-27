@@ -563,6 +563,24 @@ fn a_large_font_scrolls_inside_its_field() {
     assert!(text_drawn(&h, "Slider Control").0.min.y < laid_out.min.y - 10.0, "the text scrolled up");
 }
 
+/// A line of a larger editor font that still fits its row doesn't scroll inside its field: the
+/// whole line shows, and the wheel over the field scrolls the Timeline, as over a line of the
+/// default font. Only text cut off by the field's rows has anything to scroll to.
+#[test]
+fn a_larger_font_line_that_fits_its_row_leaves_the_wheel_to_the_timeline() {
+    for size in [14, 16] {
+        let (mut h, _) = harness();
+        h.state_mut().session.prefs.scripting.editor_font_size = size;
+        let (_, opacity) = with_expression(&mut h, "opacity", "value * 0.5");
+        let field = rect_of(&h, &format!("timeline.prop.{opacity}.expression"));
+        let (laid_out, shown) = text_drawn(&h, "value * 0.5");
+        assert!(shown.height() >= laid_out.height() - 0.5, "{size} pt: the whole line shows: {shown:?} of {laid_out:?}");
+        let scroll_y = h.state().ui.timeline.scroll_y;
+        wheel(&mut h, field.center(), -100.0);
+        assert!(h.state().ui.timeline.scroll_y > scroll_y, "{size} pt: the Timeline scrolls over a one-line field");
+    }
+}
+
 fn key_with(h: &mut Harness<'_, EffectcraftApp>, key: Key, modifiers: Modifiers) {
     h.input_mut().events.push(Event::ModifiersChanged(modifiers));
     h.input_mut().events.push(Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers });
