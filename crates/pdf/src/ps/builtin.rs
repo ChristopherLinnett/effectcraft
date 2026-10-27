@@ -1,10 +1,10 @@
 use super::eps::find_from;
 use super::scanner::Src;
-use super::text::encoding_array;
-use super::value::{Flow, V, array, matrix_of, matrix_val, new_dict};
+use super::value::{Flow, V, array, matrix_of, new_dict};
 use super::*;
 
 impl Interp {
+    /// Dispatch a built-in operator, propagating resource-limit quits to stop the program.
     pub(super) fn builtin(&mut self, n: &str, src: &mut Src) -> Result<(), Flow> {
         match n {
             // Stack.
@@ -24,11 +24,13 @@ impl Interp {
             "copy" => match self.pop() {
                 V::Num(k) => {
                     let k = (k.max(0.0) as usize).min(self.st.len());
-                    let tail: Vec<V> = self.st[self.st.len() - k..].to_vec();
-                    self.st.extend(tail);
+                    self.stack_room(k)?;
+                    self.allocate_items(k)?;
+                    self.st.extend_from_within(self.st.len() - k..);
                 }
                 V::Array(dst) => {
-                    let s = self.pop().items().unwrap_or_default();
+                    let a = self.pop();
+                    let s = self.items(&a)?;
                     let mut d = dst.borrow_mut();
                     for (i, v) in s.into_iter().enumerate() {
                         if i < d.len() {
@@ -70,6 +72,7 @@ impl Interp {
             }
             "]" => {
                 let k = self.st.iter().rev().position(|v| matches!(v, V::Mark)).unwrap_or(self.st.len());
+                self.allocate_items(k)?;
                 let items = self.st.split_off(self.st.len() - k);
                 self.st.pop();
                 self.push(array(items));
@@ -141,7 +144,10 @@ impl Interp {
                     (V::Null, V::Null) => true,
                     (V::Array(x), V::Array(y)) => Rc::ptr_eq(x, y),
                     (V::Dict(x), V::Dict(y)) => Rc::ptr_eq(x, y),
-                    (x, y) => !x.key().is_empty() && x.key() == y.key(),
+                    (x, y) => {
+                        let key = self.comparison_key(x)?;
+                        !key.is_empty() && key == self.comparison_key(y)?
+                    }
                 };
                 self.push(V::Bool(eq == (n == "eq")));
             }
@@ -253,6 +259,7 @@ impl Interp {
                         }
                     }
                     V::Str(s) => {
+                        self.allocate(s.borrow().len())?;
                         let bytes = s.borrow().clone();
                         for c in bytes {
                             self.spend(1)?;
@@ -264,7 +271,7 @@ impl Interp {
                         }
                     }
                     a => {
-                        for v in a.items().unwrap_or_default() {
+                        for v in self.items(&a)? {
                             self.spend(1)?;
                             self.push(v);
                             match self.exec_obj(p.clone(), src) {
@@ -367,7 +374,7 @@ impl Interp {
                         let f = self.find_font(&key);
                         self.push(V::Dict(f));
                     }
-                    ("findencoding", _) | (_, "Encoding") => self.push(encoding_array(&key)),
+                    ("findencoding", _) | (_, "Encoding") => self.push_encoding(&key)?,
                     _ => self.push(V::Dict(new_dict())),
                 }
             }
@@ -388,10 +395,12 @@ impl Interp {
             // Arrays and strings.
             "array" => {
                 let k = self.popn().clamp(0.0, 1e6) as usize;
+                self.allocate_items(k)?;
                 self.push(array(vec![V::Null; k]));
             }
             "string" => {
                 let k = self.popn().clamp(0.0, 1e7) as usize;
+                self.allocate(k)?;
                 self.push(V::Str(Rc::new(RefCell::new(vec![0; k]))));
             }
             "length" => {
@@ -399,7 +408,7 @@ impl Interp {
                     V::Str(s) => s.borrow().len(),
                     V::Dict(d) => d.borrow().len(),
                     V::Name(s) | V::Lit(s) => s.len(),
-                    v => v.items().map_or(0, |i| i.len()),
+                    v => v.item_count(),
                 };
                 self.push(V::Num(l as f64));
             }
@@ -408,7 +417,9 @@ impl Interp {
                 let v = match self.pop() {
                     V::Dict(d) => d.borrow().get(&k.key()).cloned().unwrap_or(V::Null),
                     V::Str(s) => V::Num(s.borrow().get(k.num().unwrap_or(0.0) as usize).copied().unwrap_or(0) as f64),
-                    a => a.items().and_then(|i| i.get(k.num().unwrap_or(0.0) as usize).cloned()).unwrap_or(V::Null),
+                    V::Array(a) => a.borrow().get(k.num().unwrap_or(0.0) as usize).cloned().unwrap_or(V::Null),
+                    V::Proc(p) => p.get(k.num().unwrap_or(0.0) as usize).cloned().unwrap_or(V::Null),
+                    _ => V::Null,
                 };
                 self.push(v);
             }
@@ -440,13 +451,22 @@ impl Interp {
                 match self.pop() {
                     V::Str(s) => {
                         let b = s.borrow();
-                        let part = b.get(i.min(b.len())..(i + c).min(b.len())).unwrap_or(&[]).to_vec();
+                        let part = b.get(i.min(b.len())..i.saturating_add(c).min(b.len())).unwrap_or(&[]);
+                        self.allocate(part.len())?;
+                        let part = part.to_vec();
                         drop(b);
                         self.push(V::Str(Rc::new(RefCell::new(part))));
                     }
                     a => {
-                        let items = a.items().unwrap_or_default();
-                        let part = items.get(i.min(items.len())..(i + c).min(items.len())).unwrap_or(&[]).to_vec();
+                        let len = a.item_count();
+                        let start = i.min(len);
+                        let end = i.saturating_add(c).min(len);
+                        self.allocate_items(end.saturating_sub(start))?;
+                        let part = match a {
+                            V::Array(a) => a.borrow().get(start..end).unwrap_or(&[]).to_vec(),
+                            V::Proc(p) => p.get(start..end).unwrap_or(&[]).to_vec(),
+                            _ => vec![],
+                        };
                         self.push(array(part));
                     }
                 }
@@ -458,7 +478,9 @@ impl Interp {
             }
             "aload" => {
                 let a = self.pop();
-                for v in a.items().unwrap_or_default() {
+                let len = a.item_count();
+                self.stack_room(len.saturating_add(1))?;
+                for v in self.items(&a)? {
                     self.push(v);
                 }
                 self.push(a);
@@ -467,16 +489,24 @@ impl Interp {
                 let a = self.pop();
                 if let V::Array(arr) = &a {
                     let k = arr.borrow().len().min(self.st.len());
+                    self.allocate_items(k)?;
                     let items = self.st.split_off(self.st.len() - k);
                     *arr.borrow_mut() = items;
                 }
                 self.push(a);
             }
             "cvx" => match self.pop() {
-                V::Array(a) => self.push(V::Proc(Rc::new(a.borrow().clone()))),
+                V::Array(a) => {
+                    self.allocate_items(a.borrow().len())?;
+                    self.push(V::Proc(Rc::new(a.borrow().clone())));
+                }
                 V::Lit(s) => self.push(V::Name(s)),
                 V::Str(s) => {
                     // Executable string: tokenize it as a procedure.
+                    // At most one value per source byte, plus up to four decoded bytes per
+                    // source byte (ASCII85's `z`), and the source snapshot itself. Charge the
+                    // conservative bound before parsing.
+                    self.allocate(s.borrow().len().saturating_mul(std::mem::size_of::<V>() + 5))?;
                     let bytes = s.borrow().clone();
                     let mut sub = Src { d: &bytes, pos: 0 };
                     let mut body = vec![];
@@ -488,7 +518,10 @@ impl Interp {
                 v => self.push(v),
             },
             "cvlit" => match self.pop() {
-                V::Proc(p) => self.push(array(p.as_ref().clone())),
+                V::Proc(p) => {
+                    self.allocate_items(p.len())?;
+                    self.push(array(p.as_ref().clone()));
+                }
                 V::Name(s) => self.push(V::Lit(s)),
                 v => self.push(v),
             },
@@ -498,7 +531,15 @@ impl Interp {
             }
             "cvs" => {
                 self.pop();
-                let k = self.pop().key();
+                let v = self.pop();
+                let bytes = match &v {
+                    V::Str(s) => s.borrow().len().saturating_mul(3),
+                    V::Name(s) | V::Lit(s) => s.len(),
+                    // f64's non-exponential decimal representation, a boolean or an empty key.
+                    _ => 512,
+                };
+                self.allocate(bytes)?;
+                let k = v.key();
                 self.push(V::Str(Rc::new(RefCell::new(k.into_bytes()))));
             }
             "xcheck" => {
@@ -522,7 +563,10 @@ impl Interp {
             }
             "bind" | "readonly" | "executeonly" | "noaccess" => {}
             "languagelevel" => self.push(V::Num(3.0)),
-            "version" | "product" => self.push(V::Str(Rc::new(RefCell::new(b"3010".to_vec())))),
+            "version" | "product" => {
+                self.allocate(4)?;
+                self.push(V::Str(Rc::new(RefCell::new(b"3010".to_vec()))));
+            }
             "save" => {
                 self.spend(self.gs.path.elements().len())?;
                 self.saved.push(self.gs.clone());
@@ -669,7 +713,8 @@ impl Interp {
             "setmiterlimit" => self.gs.miter = self.popn(),
             "setdash" => {
                 let off = self.popn();
-                let a: Vec<f64> = self.pop().items().unwrap_or_default().iter().filter_map(V::num).collect();
+                let v = self.pop();
+                let a: Vec<f64> = self.items(&v)?.iter().filter_map(V::num).collect();
                 self.gs.dash = (!a.is_empty() && a.iter().any(|v| *v > 0.0)).then_some((a, off));
             }
             "setflat" | "setstrokeadjust" | "setoverprint" | "setrenderingintent" | "setcolorrendering" | "sethalftone" | "settransfer" => {
@@ -734,14 +779,14 @@ impl Interp {
                 }
             }
             // Coordinates.
-            "matrix" => self.push(matrix_val(Affine::IDENTITY)),
+            "matrix" => self.push_matrix(Affine::IDENTITY)?,
             "identmatrix" | "defaultmatrix" => {
                 self.pop();
-                self.push(matrix_val(Affine::IDENTITY));
+                self.push_matrix(Affine::IDENTITY)?;
             }
             "currentmatrix" => {
                 self.pop();
-                self.push(matrix_val(self.gs.ctm));
+                self.push_matrix(self.gs.ctm)?;
             }
             "setmatrix" => {
                 let m = self.pop();
@@ -758,12 +803,12 @@ impl Interp {
                 let b = self.pop();
                 let a = self.pop();
                 let (a, b) = (matrix_of(&a).unwrap_or(Affine::IDENTITY), matrix_of(&b).unwrap_or(Affine::IDENTITY));
-                self.push(matrix_val(b * a));
+                self.push_matrix(b * a)?;
             }
             "invertmatrix" => {
                 self.pop();
                 let a = self.pop();
-                self.push(matrix_val(matrix_of(&a).unwrap_or(Affine::IDENTITY).inverse()));
+                self.push_matrix(matrix_of(&a).unwrap_or(Affine::IDENTITY).inverse())?;
             }
             "translate" | "scale" => {
                 let top = self.pop();
@@ -774,7 +819,7 @@ impl Interp {
                 let x = self.popn();
                 let t = if n == "translate" { Affine::translate((x, y)) } else { Affine::scale_non_uniform(x, y) };
                 match m_out {
-                    Some(_) => self.push(matrix_val(t)),
+                    Some(_) => self.push_matrix(t)?,
                     None => self.gs.ctm *= t,
                 }
             }
@@ -783,7 +828,7 @@ impl Interp {
                 match top {
                     V::Array(_) => {
                         let a = self.popn();
-                        self.push(matrix_val(Affine::rotate(a.to_radians())));
+                        self.push_matrix(Affine::rotate(a.to_radians()))?;
                     }
                     v => self.gs.ctm *= Affine::rotate(v.num().unwrap_or(0.0).to_radians()),
                 }

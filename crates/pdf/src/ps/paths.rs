@@ -141,12 +141,13 @@ impl Interp {
         self.b.fill_stroke(path, Affine::IDENTITY, fill.map(|r| (Paint::Color(self.gs.color), 1.0, r)), st);
     }
 
+    /// Read scalar or array rectangle operands, charging array snapshots and generated path work.
     pub(super) fn rect_path(&mut self) -> Result<Vec<BezPath>, Flow> {
         // x y w h, or an array / string of numbers.
         let top = self.pop();
         let nums: Vec<f64> = match &top {
             V::Array(_) | V::Proc(_) => {
-                let items = top.items().unwrap_or_default();
+                let items = self.items(&top)?;
                 // An array's rectangles count against the budget, five path elements each.
                 self.spend(items.len() / 4 * 5)?;
                 items.iter().filter_map(V::num).collect()

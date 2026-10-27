@@ -1,12 +1,20 @@
 use super::eps::embedded_fonts;
 use super::scanner::Src;
-use super::value::{Flow, GState, V, new_dict};
+use super::text::encoding_array;
+use super::value::{Flow, GState, V, matrix_val, new_dict};
 use super::*;
 
 /// The deepest procedure nesting run (deeper recursion stops the program).
 const MAX_CALL_DEPTH: usize = 256;
 
+/// The most operands retained on the operand stack.
+pub(super) const MAX_STACK: usize = 100_000;
+
+/// Runtime compound payloads, excluding source tokens, graphics, fonts and container overhead.
+const MAX_ALLOCATION: usize = 256 * 1024 * 1024;
+
 impl Interp {
+    /// Create an interpreter with independent operation and cumulative runtime-payload budgets.
     pub fn new(page: [f64; 4]) -> Interp {
         Interp {
             b: Builder::new(),
@@ -28,6 +36,7 @@ impl Interp {
             },
             saved: vec![],
             budget: 8_000_000,
+            allocation_budget: MAX_ALLOCATION,
             calls: 0,
             font_dir: HashMap::new(),
             embedded: HashMap::new(),
@@ -55,10 +64,68 @@ impl Interp {
         self.pop().num().unwrap_or(0.0)
     }
 
+    /// Retain one operand if it fits; bulk callers must preflight their complete result.
     pub(super) fn push(&mut self, v: V) {
-        if self.st.len() < 100_000 {
+        if self.st.len() < MAX_STACK {
             self.st.push(v);
         }
+    }
+
+    /// Refuse a bulk result before any operands are copied when `n` more slots would exceed the cap.
+    pub(super) fn stack_room(&mut self, n: usize) -> Result<(), Flow> {
+        if self.st.len().saturating_add(n) <= MAX_STACK {
+            return Ok(());
+        }
+        self.b.skip("PostScript (operand stack limit)");
+        Err(Flow::Quit)
+    }
+
+    /// Charge before allocating: discarded or overwritten objects do not replenish the budget.
+    pub(super) fn allocate(&mut self, bytes: usize) -> Result<(), Flow> {
+        match self.allocation_budget.checked_sub(bytes) {
+            Some(left) => {
+                self.allocation_budget = left;
+                Ok(())
+            }
+            None => {
+                self.b.skip("PostScript (allocation limit)");
+                Err(Flow::Quit)
+            }
+        }
+    }
+
+    /// Charge runtime value slots by their in-memory size, saturating oversized byte counts.
+    pub(super) fn allocate_items(&mut self, n: usize) -> Result<(), Flow> {
+        self.allocate(n.saturating_mul(std::mem::size_of::<V>()))
+    }
+
+    /// Charge then snapshot array/procedure slots shallowly, returning no items for other values.
+    pub(super) fn items(&mut self, v: &V) -> Result<Vec<V>, Flow> {
+        self.allocate_items(v.item_count())?;
+        Ok(v.items().unwrap_or_default())
+    }
+
+    /// Precharge a string's worst-case lossy UTF-8 copy before producing the existing equality key.
+    pub(super) fn comparison_key(&mut self, v: &V) -> Result<String, Flow> {
+        if let V::Str(s) = v {
+            // Lossy UTF-8 replaces each invalid byte with at most three output bytes.
+            self.allocate(s.borrow().len().saturating_mul(3))?;
+        }
+        Ok(v.key())
+    }
+
+    /// Charge the six matrix slots before constructing and pushing their array.
+    pub(super) fn push_matrix(&mut self, m: Affine) -> Result<(), Flow> {
+        self.allocate_items(6)?;
+        self.push(matrix_val(m));
+        Ok(())
+    }
+
+    /// Charge all 256 encoding slots before constructing and pushing their glyph-name array.
+    pub(super) fn push_encoding(&mut self, name: &str) -> Result<(), Flow> {
+        self.allocate_items(256)?;
+        self.push(encoding_array(name));
+        Ok(())
     }
 
     pub(super) fn lookup(&self, k: &str) -> Option<V> {

@@ -38,6 +38,15 @@ impl V {
             _ => String::new(),
         }
     }
+    /// Return the array/procedure length without cloning its payload; other values have no items.
+    pub(super) fn item_count(&self) -> usize {
+        match self {
+            V::Array(a) => a.borrow().len(),
+            V::Proc(p) => p.len(),
+            _ => 0,
+        }
+    }
+
     pub(super) fn items(&self) -> Option<Vec<V>> {
         match self {
             V::Array(a) => Some(a.borrow().clone()),
@@ -78,9 +87,21 @@ pub(super) fn array(v: Vec<V>) -> V {
     V::Array(Rc::new(RefCell::new(v)))
 }
 
+/// Borrow an array/procedure and read exactly six numeric entries, ignoring nonnumeric entries.
 pub(super) fn matrix_of(v: &V) -> Option<Affine> {
-    let a: Vec<f64> = v.items()?.iter().filter_map(V::num).collect();
-    (a.len() == 6).then(|| Affine::new([a[0], a[1], a[2], a[3], a[4], a[5]]))
+    let read = |items: &[V]| {
+        let mut nums = items.iter().filter_map(V::num);
+        let mut a = [0.0; 6];
+        for n in &mut a {
+            *n = nums.next()?;
+        }
+        nums.next().is_none().then(|| Affine::new(a))
+    };
+    match v {
+        V::Array(a) => read(&a.borrow()),
+        V::Proc(p) => read(p),
+        _ => None,
+    }
 }
 
 pub(super) fn matrix_val(m: Affine) -> V {

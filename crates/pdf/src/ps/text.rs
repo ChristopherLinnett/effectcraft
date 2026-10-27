@@ -113,11 +113,15 @@ impl Interp {
         self.b.fill_stroke_named(&name, path, Affine::IDENTITY, Some((Paint::Color(self.gs.color), 1.0, FillRule::NonZero)), None);
     }
 
-    fn pop_string(&mut self) -> Vec<u8> {
-        match self.pop() {
-            V::Str(s) => s.borrow().clone(),
+    /// Pop and precharge a string-byte snapshot for text operators; nonstrings produce no bytes.
+    fn pop_string(&mut self) -> Result<Vec<u8>, Flow> {
+        Ok(match self.pop() {
+            V::Str(s) => {
+                self.allocate(s.borrow().len())?;
+                s.borrow().clone()
+            }
             _ => vec![],
-        }
+        })
     }
 
     fn show_with(&mut self, s: &[u8], extra: impl FnMut(usize, u32) -> (f64, f64)) -> Result<(), Flow> {
@@ -180,26 +184,26 @@ impl Interp {
                 let key = self.pop().key();
                 self.font_dir.remove(&key);
             }
-            "StandardEncoding" | "ISOLatin1Encoding" => self.push(encoding_array(n)),
+            "StandardEncoding" | "ISOLatin1Encoding" => self.push_encoding(n)?,
             "show" => {
-                let s = self.pop_string();
+                let s = self.pop_string()?;
                 self.show_with(&s, |_, _| (0.0, 0.0))?;
             }
             "ashow" => {
-                let s = self.pop_string();
+                let s = self.pop_string()?;
                 let ay = self.popn();
                 let ax = self.popn();
                 self.show_with(&s, |_, _| (ax, ay))?;
             }
             "widthshow" => {
-                let s = self.pop_string();
+                let s = self.pop_string()?;
                 let ch = self.popn() as u32;
                 let cy = self.popn();
                 let cx = self.popn();
                 self.show_with(&s, |_, c| if c == ch { (cx, cy) } else { (0.0, 0.0) })?;
             }
             "awidthshow" => {
-                let s = self.pop_string();
+                let s = self.pop_string()?;
                 let ay = self.popn();
                 let ax = self.popn();
                 let ch = self.popn() as u32;
@@ -209,13 +213,14 @@ impl Interp {
             }
             "kshow" | "cshow" => {
                 // The procedure between characters is not run.
-                let s = self.pop_string();
+                let s = self.pop_string()?;
                 self.pop();
                 self.show_with(&s, |_, _| (0.0, 0.0))?;
             }
             "xshow" | "yshow" | "xyshow" => {
-                let disp: Vec<f64> = self.pop().items().unwrap_or_default().iter().filter_map(V::num).collect();
-                let s = self.pop_string();
+                let v = self.pop();
+                let disp: Vec<f64> = self.items(&v)?.iter().filter_map(V::num).collect();
+                let s = self.pop_string()?;
                 self.explicit_show(&s, &disp, n)?;
             }
             "glyphshow" => {
@@ -232,7 +237,7 @@ impl Interp {
             }
             "charpath" => {
                 self.pop();
-                let s = self.pop_string();
+                let s = self.pop_string()?;
                 let saved = std::mem::take(&mut self.gs.path);
                 let start = self.gs.start;
                 match self.text_path(&s, |_, _| (0.0, 0.0))? {
@@ -252,7 +257,7 @@ impl Interp {
                 }
             }
             "stringwidth" => {
-                let s = self.pop_string();
+                let s = self.pop_string()?;
                 let (mut w, mut h) = (0.0, 0.0);
                 if let Some(d) = self.gs.font.clone()
                     && let Some((font, m)) = self.font_of(&d)
