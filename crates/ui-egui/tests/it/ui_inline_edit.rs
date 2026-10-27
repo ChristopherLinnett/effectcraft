@@ -570,6 +570,24 @@ fn a_large_font_scrolls_inside_its_field() {
     assert!(text_drawn(&h, "Slider Control").0.min.y < laid_out.min.y - 10.0, "the text scrolled up");
 }
 
+/// The editor fills its field, so a click anywhere in it edits, even below a short expression in
+/// a field dragged taller than its text.
+#[test]
+fn a_click_below_a_short_expression_in_a_tall_field_edits_it() {
+    let (mut h, _) = harness();
+    let (layer, opacity) = with_expression(&mut h, "opacity", "value");
+    h.state_mut().ui.timeline.expr_lines.insert(opacity, 4);
+    h.run_steps(3);
+    let field = rect_of(&h, &format!("timeline.prop.{opacity}.expression"));
+    click(&mut h, pos2(field.center().x, field.max.y - 8.0), 1);
+    key(&mut h, Key::End);
+    type_text(&mut h, " * 2");
+    key_with(&mut h, Key::Enter, Modifiers::COMMAND);
+    let comp = h.state().session.active_comp().unwrap();
+    let expr = comp.layer(effectcraft_engine::project::LayerId(layer)).unwrap().props.find(opacity).unwrap().expr.as_ref().unwrap().text.clone();
+    assert_eq!(expr, "value * 2", "the click {field:?} started editing");
+}
+
 /// Alt+wheel over an expression field that scrolls zooms the Timeline's time, as anywhere over the
 /// Timeline, and does only that: the field's text stays put.
 #[test]
