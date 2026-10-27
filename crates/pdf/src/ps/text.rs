@@ -70,9 +70,9 @@ impl Interp {
     /// The font dictionary the key `k` names: one `definefont` made, else a new dictionary for an
     /// embedded program or a bundled stand-in, which Font Directory keeps.
     pub(super) fn find_font(&mut self, k: &V) -> Result<DictRef, Flow> {
-        // Looking the name up in Font Directory hashes it; charge a big string name's scan so a
-        // loop of `findfont`/`selectfont` on one cannot do work that scales with its length each
-        // time. A new font additionally keeps the name, charged below.
+        // Looking the name up in Font Directory hashes it; charge its scan (a string's or a name's)
+        // so a loop of `findfont`/`selectfont` cannot do work that scales with its length each
+        // time. A new font additionally keeps the name, length-capped and charged below.
         self.charge_scan(k)?;
         if let Some(V::Dict(d)) = k.with_key(|t| self.font_dir.borrow().get(t).cloned()) {
             return Ok(d);

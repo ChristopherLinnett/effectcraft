@@ -14,14 +14,18 @@ pub(super) const MAX_SAVE_DEPTH: usize = 1024;
 /// The most operands retained on the operand stack.
 pub(super) const MAX_STACK: usize = 100_000;
 
-/// The longest name, and dictionary key, in bytes. Hashing or comparing one is then bounded work
-/// for a single operation, however often a loop repeats it. PostScript's own limit is 127
-/// characters (PostScript Language Reference, 3rd ed., Appendix B), which conforming interpreters
-/// enforce with `limitcheck`; 255 is the longest token a DSC-conforming line can hold, so even
-/// image data this interpreter cannot step over, read as names, stays within it.
+/// The longest name or dictionary key, in bytes, that a program may make or keep at runtime
+/// ([`Interp::name_fits`]); a longer one stops it, as `limitcheck` does in a conforming
+/// interpreter (PostScript's documented limit is 127 characters, PostScript Language Reference,
+/// 3rd ed., Appendix B). Names read from the file are not capped, since inline image data the
+/// interpreter cannot step over reaches the scanner as names; running one longer than this is
+/// still constant work, because it cannot be a defined name and is not looked up.
 pub(super) const MAX_NAME: usize = 255;
 
-/// Runtime compound payloads, excluding source tokens, graphics, fonts and container overhead.
+/// What a program keeps at runtime, cumulatively: compound payloads, kept text, dictionary
+/// entries, key scans, drawable fonts and their embedded programs, dash copies. Source tokens,
+/// paths and drawn output (bounded by the operation budget and path limit) and container overhead
+/// are outside it.
 const MAX_ALLOCATION: usize = 256 * 1024 * 1024;
 
 /// What a dictionary keeps for an entry besides its key's text: the key's `String` and the value's
@@ -74,8 +78,9 @@ impl Interp {
     }
 
     /// Stop the program when a name made or kept at runtime (`cvn`, a new dictionary key, a font
-    /// name from a string) of `len` bytes would be longer than [`MAX_NAME`]. Names read from the
-    /// file are not capped here (the file bounds them); running one is bounded in [`Self::exec_name`].
+    /// name from a string) of `len` bytes would be longer than [`MAX_NAME`]. A name read from the
+    /// file is not checked when it is read, pushed or run (the file bounds them, and running one is
+    /// bounded in [`Self::exec_name`]); kept as a new key, it is.
     pub(super) fn name_fits(&mut self, len: usize) -> Result<(), Flow> {
         if len <= MAX_NAME {
             return Ok(());

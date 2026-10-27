@@ -78,19 +78,23 @@ pub(crate) struct Interp {
     gs: GState,
     saved: Vec<GState>,
     budget: usize,
-    /// Cumulative runtime array/procedure payload bytes and string bytes; never refunded.
+    /// What is left of the 256 MiB runtime allocation budget; charged before each allocation it
+    /// covers and never refunded.
     allocation_budget: usize,
     /// Nested procedure calls (recursion is cut off at [`MAX_CALL_DEPTH`]).
     calls: usize,
     /// Fonts by name (Font Directory): `definefont`d and `findfont`-made dictionaries.
     font_dir: DictRef,
-    /// Embedded font programs found in the file (name → (program, CFF)).
+    /// Embedded font programs found in the file (name → (program, CFF)): one copy each, taken
+    /// before the program runs and bounded by the file's length; each drawable font built from one
+    /// is charged the program's length for the parsed copy it keeps.
     embedded: HashMap<String, (Rc<Vec<u8>>, bool)>,
     /// Fonts built for drawing, by base font and the glyph names of their encoding, which the
     /// key shares with the dictionaries that hold them.
     font_cache: HashMap<FontKey, Rc<Font>>,
-    /// A pointer-identity accelerator in front of `font_cache`: the same dictionary drawn again is
-    /// answered without hashing its glyph names. Cleared when large; `font_cache` is the truth.
+    /// A pointer-identity accelerator in front of `font_cache`: a font whose base and glyph-name
+    /// objects are the same as before is found without hashing their text. Cleared at 1,024
+    /// entries; `font_cache` is the truth.
     font_fast: HashMap<FastKey, Rc<Font>>,
     page: [f64; 4],
     pub unknown: Vec<String>,

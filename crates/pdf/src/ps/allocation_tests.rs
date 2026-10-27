@@ -375,15 +375,18 @@ fn eps_stack_boundaries_preserve_order_and_compound_identity() {
 }
 
 /// Array slots, string bytes and dictionary keys must consume one counter without refunds on
-/// overwrite or drop; overwriting a key's value costs nothing more.
+/// overwrite or drop; overwriting a key's value keeps nothing new and charges only the scan that
+/// finds the key.
 #[test]
 fn eps_mixed_payloads_exhaust_one_budget_without_refunds() {
     let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
     let slots = 2 * std::mem::size_of::<V>();
-    // Two slots, three string bytes, and the entry `a` once: its second `def` overwrites.
-    it.allocation_budget = slots + 3 + "a".len() + std::mem::size_of::<(String, V)>();
+    // Two slots, three string bytes, the entry `a` once, and the scan of `a` when its second `def`
+    // overwrites it: exactly the budget, so the program runs to its end.
+    it.allocation_budget = slots + 3 + "a".len() + std::mem::size_of::<(String, V)>() + "a".len();
     it.run(b"/a 2 array def 3 string pop /a null def");
     assert_eq!(it.allocation_budget, 0);
+    assert!(it.b.skipped.is_empty(), "the exact budget fits: {:?}", it.b.skipped);
     it.run(b"0 string pop 1 string");
     assert_eq!(it.allocation_budget, 0);
     assert!(it.st.is_empty(), "refused allocation must not push a partial result");
@@ -587,7 +590,8 @@ fn eps_fonts_charge_their_keys_and_matrices() {
 }
 
 /// `glyphshow` draws through a cached font that names just that glyph: the first use of a glyph
-/// charges what that font keeps, and drawing it again costs nothing, however many times.
+/// charges what that font keeps, and drawing it again charges nothing more to the allocation
+/// budget, however many times (its outline's elements are spent as operations).
 #[test]
 fn eps_glyphshow_charges_a_new_glyph_once() {
     use std::mem::size_of;
@@ -634,9 +638,10 @@ fn eps_gsave_stops_at_the_depth_limit() {
     assert!(nodes.len() == 1 && skipped == ["PostScript (graphics state depth limit)"], "{skipped:?}");
 }
 
-/// A font's encoding is read in place to find its cached font, so showing text with a font
-/// already built costs nothing more; building it charges what it keeps first: the font, its
-/// 256-name glyph table, its base name and the first 256 encoding entries it is cached by.
+/// A font's encoding names are matched by identity (or, when new, by their text) to find its
+/// cached font, so showing text with a font already built charges only the string shown; building
+/// it charges what it keeps first: the font, its 256-name glyph table, its base name and the first
+/// 256 encoding entries it is cached by.
 #[test]
 fn eps_text_charges_a_new_fonts_encoding_names_once() {
     use std::mem::size_of;
