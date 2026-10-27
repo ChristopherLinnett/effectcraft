@@ -2081,8 +2081,11 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         if (pinch - 1.0).abs() > 1e-4 {
             set_zoom(&mut app.ui.timeline, &comp, tm.pps * pinch, fit_pps, tm.t(at_x), (at_x - tm.x0) as f64);
         } else if zoom && dy.abs() > 0.0 {
-            // Alt+wheel zooms around the pointer, out until the whole comp shows.
+            // Alt+wheel zooms around the pointer, out until the whole comp shows. It only zooms:
+            // the turn is used up here, so an expression field under the pointer that scrolls
+            // (drawn later) doesn't scroll its text too.
             set_zoom(&mut app.ui.timeline, &comp, tm.pps * (dy as f64 / 200.0).exp(), fit_pps, tm.t(at_x), (at_x - tm.x0) as f64);
+            ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
         } else {
             let hover = ui.input(|i| i.pointer.hover_pos());
             let over_outline = hover.is_some_and(|p| p.x < graph_x0);

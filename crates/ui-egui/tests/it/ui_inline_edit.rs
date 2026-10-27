@@ -427,15 +427,22 @@ fn wheel(h: &mut Harness<'_, EffectcraftApp>, at: Pos2, dy: f32) {
 
 /// A wheel turn of `delta` points (sideways too) over `at`.
 fn wheel_by(h: &mut Harness<'_, EffectcraftApp>, at: Pos2, delta: egui::Vec2) {
+    wheel_with(h, at, delta, Modifiers::NONE);
+}
+
+/// A wheel turn of `delta` points over `at` with `modifiers` held.
+fn wheel_with(h: &mut Harness<'_, EffectcraftApp>, at: Pos2, delta: egui::Vec2, modifiers: Modifiers) {
     h.input_mut().events.push(Event::PointerMoved(at));
+    h.input_mut().events.push(Event::ModifiersChanged(modifiers));
     h.input_mut().events.push(Event::MouseWheel {
         unit: egui::MouseWheelUnit::Point,
         delta,
-        modifiers: Modifiers::NONE,
+        modifiers,
         phase: egui::TouchPhase::Move,
         source: egui::MouseWheelSource::Wheel,
     });
     h.run_steps(20);
+    h.input_mut().events.push(Event::ModifiersChanged(Modifiers::NONE));
 }
 
 /// #1396: an expression taller than its field scrolls inside it. No line is drawn over the rows
@@ -561,6 +568,22 @@ fn a_large_font_scrolls_inside_its_field() {
     wheel(&mut h, field.center(), -100.0);
     assert_eq!(h.state().ui.timeline.scroll_y, scroll_y, "the wheel scrolls the text, not the Timeline");
     assert!(text_drawn(&h, "Slider Control").0.min.y < laid_out.min.y - 10.0, "the text scrolled up");
+}
+
+/// Alt+wheel over an expression field that scrolls zooms the Timeline's time, as anywhere over the
+/// Timeline, and does only that: the field's text stays put.
+#[test]
+fn alt_wheel_over_a_long_expression_only_zooms_the_timeline() {
+    let (mut h, _) = harness();
+    let (_, position) = with_expression(&mut h, "position", BOUNCE);
+    h.state_mut().ui.timeline.pps = Some(300.0);
+    h.run_steps(3);
+    let field = rect_of(&h, &format!("timeline.prop.{position}.expression"));
+    let (laid_out, _) = text_drawn(&h, "oscillation");
+    wheel_with(&mut h, field.center(), egui::vec2(0.0, -200.0), Modifiers::ALT);
+    assert_ne!(h.state().ui.timeline.pps, Some(300.0), "Alt+wheel zooms the Timeline");
+    let (after, _) = text_drawn(&h, "oscillation");
+    assert!((after.min.y - laid_out.min.y).abs() < 1.0, "the text stays put: {after:?} from {laid_out:?}");
 }
 
 /// The line numbers sit beside the text, outside the part of the field that scrolls, so the wheel
