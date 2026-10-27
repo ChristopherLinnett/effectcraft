@@ -425,7 +425,7 @@ fn eps_runtime_payload_allocations_are_cumulative() {
 
 /// Length, element and matrix reads must still work when no payload-copy budget remains.
 #[test]
-fn eps_reads_do_not_copy_entire_arrays() {
+fn eps_reads_work_with_no_allocation_budget_left() {
     let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
     it.run(b"/a [ 1 2 3 ] def /m [ 2 0 0 3 0 0 ] def");
     it.allocation_budget = 0;
@@ -433,4 +433,23 @@ fn eps_reads_do_not_copy_entire_arrays() {
     assert_eq!(it.st.iter().filter_map(V::num).collect::<Vec<_>>(), [3.0, 2.0, 2.0, 3.0]);
     let (_, _, skipped) = it.b.finish();
     assert!(skipped.is_empty(), "{skipped:?}");
+}
+
+/// A fresh interpreter has the 256 MiB runtime allocation budget the README documents: strings
+/// totalling exactly 256 MiB fit, one byte more quits with the allocation-limit note and draws
+/// nothing after.
+#[test]
+fn eps_interpreters_start_with_a_256_mib_allocation_budget() {
+    // 26 strings of 10 000 000 bytes, then the rest of 268 435 456 (or one byte past it).
+    let rest = (256 << 20) - 26 * 10_000_000;
+    for (last, fits) in [(rest, true), (rest + 1, false)] {
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        it.run(format!("26 {{ 10000000 string pop }} repeat {last} string pop 0 0 10 10 rectfill").as_bytes());
+        let (nodes, _, skipped) = it.b.finish();
+        if fits {
+            assert!(skipped.is_empty() && nodes.len() == 1, "256 MiB fits: {skipped:?}");
+        } else {
+            assert!(nodes.is_empty() && skipped == ["PostScript (allocation limit)"], "one byte more doesn't: {skipped:?}");
+        }
+    }
 }
