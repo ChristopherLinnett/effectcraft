@@ -126,8 +126,9 @@ fn expr_buf_id(prop: u64) -> egui::Id {
     egui::Id::unique(("expr-buf", prop))
 }
 
-/// The expression fields whose text is wider or taller than the field, as last drawn, and which
-/// way: the wheel over one scrolls its text that way rather than the Timeline (#1396).
+/// The text areas of the expression fields whose text is wider or taller than the field, as last
+/// drawn, and which way: the wheel over one scrolls its text that way rather than the Timeline
+/// (#1396). The line numbers sit beside a text area, so the wheel over them scrolls the Timeline.
 fn scrolling_exprs_id() -> egui::Id {
     egui::Id::unique("tl-expr-scrolling")
 }
@@ -2893,10 +2894,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
                 // Settings ▸ Scripting & Expressions ▸ Expressions Editor.
                 let sp = app.session.prefs.scripting.clone();
-                let (resp, overflows) =
+                let (resp, text_area, overflows) =
                     super::expr_editor::editor(ui, edit_id, &mut buf, er, &sp, if ex.enabled { expr_col } else { t.text_dim }, *lines as f32 * rh, &t);
                 if overflows.contains(&true) {
-                    scrolling_exprs.push((er, overflows));
+                    scrolling_exprs.push((text_area, overflows));
                 }
                 app.auto.add(&format!("timeline.prop.{uid}.expression"), er, &prop.name);
                 // Its bottom edge drags to set its height in whole lines, as in After Effects.

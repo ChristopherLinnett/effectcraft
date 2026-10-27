@@ -563,6 +563,25 @@ fn a_large_font_scrolls_inside_its_field() {
     assert!(text_drawn(&h, "Slider Control").0.min.y < laid_out.min.y - 10.0, "the text scrolled up");
 }
 
+/// The line numbers sit beside the text, outside the part of the field that scrolls, so the wheel
+/// over them scrolls the Timeline, as anywhere else outside the text; over the text it scrolls
+/// the text.
+#[test]
+fn the_wheel_over_a_long_expressions_line_numbers_scrolls_the_timeline() {
+    let (mut h, _) = harness();
+    let (_, position) = with_expression(&mut h, "position", BOUNCE);
+    let field = rect_of(&h, &format!("timeline.prop.{position}.expression"));
+    let (laid_out, _) = text_drawn(&h, "oscillation");
+    let scroll_y = h.state().ui.timeline.scroll_y;
+    let numbers = line_numbers_shown(&h, field);
+    let over_numbers = pos2(numbers[0].1.center().x, field.center().y);
+    wheel(&mut h, over_numbers, -100.0);
+    assert!(h.state().ui.timeline.scroll_y > scroll_y, "the Timeline scrolls under the line numbers {numbers:?}");
+    let moved = rect_of(&h, &format!("timeline.prop.{position}.expression"));
+    let offset = text_drawn(&h, "oscillation").0.min.y - moved.min.y;
+    assert!((offset - (laid_out.min.y - field.min.y)).abs() < 1.0, "and the text stays put in its field: {offset}");
+}
+
 /// A line of a larger editor font that still fits its row doesn't scroll inside its field: the
 /// whole line shows, and the wheel over the field scrolls the Timeline, as over a line of the
 /// default font. Only text cut off by the field's rows has anything to scroll to.

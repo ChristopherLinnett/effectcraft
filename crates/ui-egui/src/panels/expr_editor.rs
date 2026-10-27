@@ -332,8 +332,9 @@ fn layout(text: &str, font: FontId, base: Color32, sx: &Syntax, p: &Scripting, b
 }
 
 /// The editor in `rect`, centred in Timeline rows `room` tall (the field's background fills
-/// them): returns the response, and whether its text is wider and taller than it can show (it
-/// then scrolls that way inside `rect`); `buf` is edited in place.
+/// them): returns the response, the part of `rect` its text scrolls in (the line numbers sit
+/// beside it), and whether its text is wider or taller than it can show (it then scrolls that
+/// way); `buf` is edited in place.
 pub fn editor(
     ui: &mut egui::Ui,
     id: egui::Id,
@@ -343,7 +344,7 @@ pub fn editor(
     color: Color32,
     room: f32,
     t: &Tokens,
-) -> (egui::Response, [bool; 2]) {
+) -> (egui::Response, Rect, [bool; 2]) {
     let size = (p.editor_font_size.clamp(8, 40) as f32) * 0.9;
     let font = Tokens::mono(size);
     // Line numbers in a gutter on the left.
@@ -443,7 +444,7 @@ pub fn editor(
             });
         }
     }
-    (out.response.response, overflows)
+    (out.response.response, scroll.inner_rect, overflows)
 }
 
 #[cfg(test)]
