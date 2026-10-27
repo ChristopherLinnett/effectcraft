@@ -671,6 +671,23 @@ fn a_wrapped_line_that_just_fits_its_field_leaves_the_wheel_to_the_timeline() {
     assert!(h.state().ui.timeline.scroll_y > scroll_y, "the Timeline scrolls over a line that fits");
 }
 
+/// A wheel turn is spent once: when it scrolls the Timeline until a scrolling expression field
+/// comes under the pointer, the part that scrolled the Timeline doesn't scroll the field's text
+/// too, and only the rest of the turn, over the field, scrolls the text.
+#[test]
+fn a_wheel_turn_that_brings_a_long_expression_under_the_pointer_is_spent_once() {
+    let (mut h, _) = harness();
+    let (_, position) = with_expression(&mut h, "position", BOUNCE);
+    let id = format!("timeline.prop.{position}.expression");
+    let field = rect_of(&h, &id);
+    let in_field = |h: &Harness<'_, EffectcraftApp>| text_drawn(h, "oscillation").0.min.y - rect_of(h, &id).min.y;
+    let (scroll_y, text_y) = (h.state().ui.timeline.scroll_y, in_field(&h));
+    wheel(&mut h, pos2(field.center().x, field.min.y - 4.0), -60.0);
+    let (timeline, text) = (h.state().ui.timeline.scroll_y - scroll_y, text_y - in_field(&h));
+    assert!(timeline > 0.0 && text > 0.0, "the turn scrolled the Timeline, then the text: {timeline} and {text}");
+    assert!((timeline + text - 60.0).abs() < 1.0, "a turn of 60 points scrolled {timeline} + {text}");
+}
+
 /// The line numbers sit beside the text, outside the part of the field that scrolls, so the wheel
 /// over them scrolls the Timeline, as anywhere else outside the text; over the text it scrolls
 /// the text.

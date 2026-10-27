@@ -2095,14 +2095,20 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 })
                 .unwrap_or_default();
             let shift = ui.input(|i| i.modifiers.shift);
+            // What the Timeline scrolls by is used up: the fields are routed by where they were
+            // last drawn, so a turn that brings a scrolling expression field under the pointer
+            // would otherwise scroll its text too when it is drawn below.
             if over_outline && overflow > 0.0 && (dx.abs() > 0.0 || (shift && dy.abs() > 0.0)) {
                 let d = if dx.abs() > 0.0 { dx } else { dy };
                 app.ui.timeline.outline_scroll = (app.ui.timeline.outline_scroll - d).clamp(0.0, overflow);
+                ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
             } else if !expr_y {
                 app.ui.timeline.scroll_y = (app.ui.timeline.scroll_y - dy).clamp(0.0, max_scroll);
+                ui.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
             }
             if dx.abs() > 0.0 && app.ui.timeline.pps.is_some() && !over_outline && !expr_x {
                 app.ui.timeline.start = (app.ui.timeline.start - dx as f64 / pps).max(0.0);
+                ui.input_mut(|i| i.smooth_scroll_delta.x = 0.0);
             }
         }
     }
